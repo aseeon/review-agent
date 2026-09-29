@@ -1,19 +1,27 @@
 """
-Review Agent — a single runnable file demonstrating the Claude Agent SDK patterns
-that matter for production work.
+Review Agent — reviews a git repository, or a commit range in it, for correctness,
+security and performance problems.
+
+An orchestrator delegates to three read-only reviewer sub-agents, one per concern,
+each on its own model, and merges their findings into one structured report.
 
 Run:
     python3 -m venv .venv && source .venv/bin/activate
     pip install claude-agent-sdk
     export ANTHROPIC_API_KEY=sk-ant-...
     python review_agent.py ./some/repo [base [head]]
+
+Every run appends the orchestrator's delegation plan to runs/orchestration.jsonl.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
@@ -21,6 +29,9 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookContext,
+    HookInput,
+    HookJSONOutput,
     HookMatcher,
     ResultMessage,
     TextBlock,
@@ -29,14 +40,25 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
     tool,
 )
-from claude_agent_sdk.types import (
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("agent")
+
+
+# ---------------------------------------------------------------------- models
+# Pinned, not aliases: eval numbers are only comparable if the model under them
+# doesn't move between runs. Each reviewer's model is a hypothesis the eval tests.
+#
+# No fallback_model on purpose: a silent model swap mid-run makes results
+# incomparable. Transient overloads are retried (CLAUDE_CODE_MAX_RETRIES); past
+# that, a failed review you can rerun beats a finished one you can't trust.
+
+ORCHESTRATOR_MODEL = "claude-sonnet-5-5"
+SECURITY_MODEL = "claude-opus-5-5"             # cross-file reasoning: what is *missing*
+CORRECTNESS_MODEL = "claude-sonnet-5-5"        # logic against intent, edge cases
+PERFORMANCE_MODEL = "claude-sonnet-5-5"        # static analysis: tracing hot paths across calls
+
+RUNS_LOG = Path(__file__).parent / "runs" / "orchestration.jsonl"
 
 
 # ---------------------------------------------------------------- custom tools
@@ -104,7 +126,9 @@ def build_git_server(repo_path: str):
         if not stat.strip():
             return _text(f"No changes between {refs['base']} and {refs['head']}.")
 
-        _, patch, _ = await _git(repo_path, "diff", commit_range)
+        code, patch, err = await _git(repo_path, "diff", commit_range)
+        if code != 0:
+            return _text(f"git diff failed for {commit_range}: {err.strip()}")
         body = f"{stat}\n{patch}"
         if len(body) > MAX_DIFF_CHARS:
             body = (
@@ -120,51 +144,64 @@ def build_git_server(repo_path: str):
 # ---------------------------------------------------------------------- hooks
 
 
-async def audit_every_tool_call(input_data, tool_use_id, context):
+async def audit_every_tool_call(
+    input_data: HookInput, tool_use_id: str | None, context: HookContext
+) -> HookJSONOutput:
     """Observability. Ships every tool call to your logs / tracing backend."""
-    log.info("tool_call tool=%s id=%s", input_data.get("tool_name"), tool_use_id)
+    # agent_type is only present when the call comes from inside a sub-agent.
+    log.info(
+        "tool_call agent=%s tool=%s id=%s",
+        input_data.get("agent_type", "orchestrator"),
+        input_data.get("tool_name"),
+        tool_use_id,
+    )
     return {}
-
-
-# ---------------------------------------------------------------- permissions
-
-
-async def permission_handler(
-    tool_name: str, input_data: dict, context: ToolPermissionContext
-) -> PermissionResultAllow | PermissionResultDeny:
-    """Only fires when the permission flow falls through to a prompt.
-
-    Calls already approved by allowed_tools / permission_mode never reach here —
-    a PreToolUse hook is the place to inspect those.
-    """
-    path = input_data.get("file_path", "")
-
-    if tool_name == "Write" and (path.startswith("/etc/") or path.startswith("/usr/")):
-        return PermissionResultDeny(message="System directory write denied", interrupt=True)
-
-    # Redirect rather than refuse: rewrite the call into a sandbox path.
-    if tool_name in ("Write", "Edit") and "secrets" in path:
-        return PermissionResultAllow(updated_input={**input_data, "file_path": f"./sandbox/{path}"})
-
-    return PermissionResultAllow(updated_input=input_data)
 
 
 # ------------------------------------------------------------------- subagents
 
+# Every reviewer gets the same read-only toolset. Sub-agents never get the Agent
+# tool: a reviewer that can spawn reviewers has no bounded cost.
+REVIEWER_TOOLS = ["Read", "Grep", "Glob", GIT_TOOL]
+
+# The diff is the anchor, not the boundary. Most real defects are only visible
+# from code the diff doesn't touch: the missing auth check, the caller in a loop.
+CONTEXT_RULES = (
+    " When given a commit range, call get_changed_files first and start from the "
+    "changed hunks. Then Read or Grep whatever the change depends on (callers, "
+    "decorators, validators, models, config) before deciding. Report only issues "
+    "in or caused by the change. Cite file:line for each finding. If you find "
+    "nothing, say so plainly — do not invent findings to seem useful."
+)
+
 AGENTS = {
+    "correctness-reviewer": AgentDefinition(
+        description=(
+            "Reviews code for correctness bugs: logic errors, off-by-one, wrong conditions, "
+            "unhandled edge cases (empty, None, boundaries), broken error handling."
+        ),
+        prompt=(
+            "You are a correctness reviewer. Check whether the code does what its names, "
+            "docstrings and callers expect. Leave security and performance to the other "
+            "reviewers." + CONTEXT_RULES
+        ),
+        tools=REVIEWER_TOOLS,
+        model=CORRECTNESS_MODEL,
+        maxTurns=20,  # camelCase — AgentDefinition differs from ClaudeAgentOptions
+    ),
     "security-reviewer": AgentDefinition(
         description=(
             "Reviews code for security issues: auth handling, injection, secrets in source, "
-            "unsafe deserialization. Use when the task involves reviewing a diff or a module."
+            "unsafe deserialization."
         ),
         prompt=(
             "You are a security reviewer. Report only concrete, exploitable issues. "
-            "Cite file:line for each finding. If you find nothing, say so plainly — "
-            "do not invent findings to seem useful."
+            "Absence matters as much as presence: look for the check, sanitiser or "
+            "permission that should be there and isn't." + CONTEXT_RULES
         ),
-        tools=["Read", "Grep", "Glob", GIT_TOOL],  # note: never include Task
-        model="sonnet",
-        maxTurns=20,  # camelCase — AgentDefinition differs from ClaudeAgentOptions
+        tools=REVIEWER_TOOLS,
+        model=SECURITY_MODEL,
+        maxTurns=20,
     ),
     "perf-reviewer": AgentDefinition(
         description=(
@@ -172,11 +209,13 @@ AGENTS = {
             "missing indexes, synchronous I/O in hot paths."
         ),
         prompt=(
-            "You are a performance reviewer. Quantify impact where possible "
-            "(e.g. 'O(n) queries per request'). Cite file:line."
+            "You are a performance reviewer. This is static analysis: you cannot run "
+            "or benchmark code, so reason from the code itself. Find the hot paths "
+            "(request handlers, loops over collections, queries) and quantify impact "
+            "where possible (e.g. 'O(n) queries per request')." + CONTEXT_RULES
         ),
-        tools=["Read", "Grep", "Glob", GIT_TOOL],
-        model="sonnet",
+        tools=REVIEWER_TOOLS,
+        model=PERFORMANCE_MODEL,
         maxTurns=20,
     ),
 }
@@ -195,7 +234,10 @@ REVIEW_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "category": {"type": "string", "enum": ["security", "performance"]},
+                        "category": {
+                            "type": "string",
+                            "enum": ["correctness", "security", "performance"],
+                        },
                         "location": {"type": "string"},
                         "description": {"type": "string"},
                     },
@@ -215,30 +257,32 @@ REVIEW_SCHEMA = {
 def build_options(repo_path: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         system_prompt=(
-            "You are a code review orchestrator. Delegate security analysis to the "
-            "security-reviewer subagent and performance analysis to the perf-reviewer "
-            "subagent, then synthesise their findings into one report. Do not review "
-            "the code yourself — your job is orchestration and synthesis."
+            "You are a code review orchestrator. Delegate correctness analysis to the "
+            "correctness-reviewer subagent, security analysis to the security-reviewer "
+            "subagent and performance analysis to the perf-reviewer subagent, then "
+            "synthesise their findings into one report. Do not review the code "
+            "yourself — your job is orchestration and synthesis."
         ),
         cwd=repo_path,
-        # Task is REQUIRED or subagents silently never spawn.
-        allowed_tools=["Task", "Read", "Grep", "Glob", GIT_TOOL],
-        # allowed_tools does not restrict — deny rules do. These survive bypassPermissions.
-        disallowed_tools=["Bash(rm *)", "Bash(git push *)", "WebFetch"],
+        # tools decides which built-ins exist at all; allowed_tools only decides
+        # which run without a prompt. Bash, Write, Edit and WebFetch are not
+        # denied here, they are absent: nothing to guard, no network egress.
+        # Agent (formerly Task) is required or subagents silently never spawn.
+        tools=["Agent", "Read", "Grep", "Glob"],
+        allowed_tools=["Agent", "Read", "Grep", "Glob", GIT_TOOL],
         agents=AGENTS,
         mcp_servers={"git": build_git_server(repo_path)},
         strict_mcp_config=True,   # ignore ambient .mcp.json / user settings
         setting_sources=[],       # reproducible: no filesystem settings
-        permission_mode="dontAsk",  # unattended: fail closed
-        can_use_tool=permission_handler,
+        permission_mode="dontAsk",  # unattended: anything not allowed above is denied
         hooks={
             "PreToolUse": [HookMatcher(hooks=[audit_every_tool_call])]
         },
         output_format=REVIEW_SCHEMA,
-        model="claude-sonnet-5",
-        fallback_model="claude-haiku-4-5-20251001",
+        model=ORCHESTRATOR_MODEL,
         max_turns=40,
-        max_budget_usd=2.00,   # set this on day one, not after the first bill
+        # Set on day one, not after the first bill. Raised from $2 for the Opus reviewer.
+        max_budget_usd=3.00,
         env={
             "API_TIMEOUT_MS": "120000",
             "CLAUDE_CODE_MAX_RETRIES": "2",
@@ -246,19 +290,46 @@ def build_options(repo_path: str) -> ClaudeAgentOptions:
     )
 
 
+def record_plan(
+    base: str | None, head: str | None, plan: dict[str, list[str]], result: ResultMessage
+) -> None:
+    """Append what the orchestrator decided to do on this run.
+
+    Each inner list is one assistant turn; reviewers in the same list were
+    delegated in parallel. If this is identical on every run, the model is
+    not adding anything by planning it.
+    """
+    RUNS_LOG.parent.mkdir(exist_ok=True)
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "range": f"{base}..{head or 'HEAD'}" if base else "whole repo",
+        "plan": list(plan.values()),
+        "subtype": result.subtype,
+        "turns": result.num_turns,
+        "cost_usd": result.total_cost_usd,
+    }
+    with RUNS_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+    log.info("plan=%s (appended to %s)", entry["plan"], RUNS_LOG.name)
+
+
 async def review(repo_path: str, base: str | None = None, head: str | None = None) -> dict[str, Any] | None:
     options = build_options(repo_path)
     result: dict[str, Any] | None = None
+    # Orchestrator delegations, grouped by assistant turn. The CLI streams each
+    # content block as its own message, so parallel calls share a message_id.
+    plan: dict[str, list[str]] = {}
 
     async with ClaudeSDKClient(options=options) as client:
         if base:
             scope = (
-                f"Review the changes between {base} and {head or 'HEAD'} for security and "
-                "performance issues. Reviewers should call get_changed_files for that range. "
+                f"Review the changes between {base} and {head or 'HEAD'} for correctness, "
+                "security and performance issues. Reviewers should call get_changed_files "
+                "for that range. "
             )
         else:
-            scope = "Review this repository for security and performance issues. "
-        await client.query(scope + "Delegate to both reviewer subagents, then synthesise.")
+            scope = "Review this repository for correctness, security and performance issues. "
+        await client.query(scope + "Delegate to all three reviewer subagents, then synthesise.")
 
         async for message in client.receive_response():
             if isinstance(message, AssistantMessage):
@@ -267,8 +338,13 @@ async def review(repo_path: str, base: str | None = None, head: str | None = Non
                         print(block.text, end="", flush=True)
                     elif isinstance(block, ToolUseBlock):
                         log.info("→ %s", block.name)
+                        subagent = block.input.get("subagent_type")
+                        if message.parent_tool_use_id is None and subagent:
+                            turn = message.message_id or block.id
+                            plan.setdefault(turn, []).append(subagent)
 
             elif isinstance(message, ResultMessage):
+                record_plan(base, head, plan, message)
                 # Full accounting. usage covers the main loop only — subagent
                 # tokens live in model_usage.
                 log.info(
