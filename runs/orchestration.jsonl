@@ -1,0 +1,8 @@
+{"at": "2026-09-29T11:41:48+00:00", "range": "HEAD~2..HEAD", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 6, "cost_usd": 0.20483040000000002}
+{"at": "2026-09-29T11:41:49+00:00", "range": "HEAD~4..HEAD", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 6, "cost_usd": 0.1681658}
+{"at": "2026-09-29T11:41:49+00:00", "range": "HEAD~3..HEAD", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 6, "cost_usd": 0.20174119999999998}
+{"at": "2026-09-29T11:41:51+00:00", "range": "whole repo", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 6, "cost_usd": 0.0957276}
+{"at": "2026-09-29T11:43:41+00:00", "range": "HEAD~4..HEAD", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 5, "cost_usd": 0.477298}
+{"at": "2026-09-29T11:44:17+00:00", "range": "HEAD~3..HEAD", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 5, "cost_usd": 1.0846224}
+{"at": "2026-09-29T11:44:33+00:00", "range": "HEAD~2..HEAD", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 5, "cost_usd": 1.0555434}
+{"at": "2026-09-29T11:44:39+00:00", "range": "whole repo", "plan": [["correctness-reviewer", "security-reviewer", "perf-reviewer"]], "subtype": "success", "turns": 5, "cost_usd": 0.40845040000000005}

@@ -221,3 +221,6 @@ __marimo__/
 # Project specific
 .internal/
 CLAUDE.md
+
+# Review transcripts (contain code from the reviewed repositories)
+runs/logs/

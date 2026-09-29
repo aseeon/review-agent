@@ -286,6 +286,10 @@ def build_options(repo_path: str) -> ClaudeAgentOptions:
         env={
             "API_TIMEOUT_MS": "120000",
             "CLAUDE_CODE_MAX_RETRIES": "2",
+            # Subagents run in the background by default. The orchestrator would
+            # then return its report before any reviewer finished: an empty
+            # "severity: none" that looks exactly like a clean review.
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
         },
     )
 
