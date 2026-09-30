@@ -1,17 +1,33 @@
+from pathlib import Path
+from typing import Literal
+
 import pytest
+from claude_agent_sdk import ResultMessage
 from pydantic import ValidationError
 
-from types import SimpleNamespace
-
 from review_agent.findings import (
-    MAX_FINDINGS, Finding, ReviewerOutput, check_citation, merge, overall_severity,
+    MAX_FINDINGS,
+    Finding,
+    ReviewerOutput,
+    check_citation,
+    merge,
+    overall_severity,
 )
 from review_agent.review import check_output, file_reader
 
 FILE = ["import os", "", "def load(path):", "    return open(path).read()", "", "x = 1"]
 
+Severity = Literal["low", "medium", "high"]
 
-def finding(category="security", file="a.py", start=10, end=None, severity="low", confidence="confirmed"):
+
+def finding(
+    category: str = "security",
+    file: str = "a.py",
+    start: int = 10,
+    end: int | None = None,
+    severity: Severity = "low",
+    confidence: Literal["confirmed", "suspected"] = "confirmed",
+) -> Finding:
     return Finding(file=file, line_start=start, line_end=end or start, quote="x = 1",
                    severity=severity, confidence=confidence, description="d", category=category)
 
@@ -47,17 +63,18 @@ def test_overall_severity_is_the_worst_finding():
 
 
 def test_schema_rejects_what_the_prompt_forbids():
+    valid = finding().model_dump()
     with pytest.raises(ValidationError):
-        finding(severity="very high")
+        _ = Finding.model_validate({**valid, "severity": "very high"})
     with pytest.raises(ValidationError):
-        finding(start=10, end=9)
+        _ = Finding.model_validate({**valid, "line_start": 10, "line_end": 9})
 
 
 def test_category_is_set_by_code_not_by_the_model():
     assert "category" not in str(ReviewerOutput.model_json_schema())
 
 
-def cited(start, quote, end=None):
+def cited(start: int, quote: str, end: int | None = None) -> Finding:
     return finding(start=start, end=end).model_copy(update={"quote": quote})
 
 
@@ -76,21 +93,21 @@ def test_citation_past_the_end_of_the_file_is_relocated_or_unverified():
 
 
 def test_ambiguous_or_missing_citations_are_unverified():
-    assert check_citation(cited(6, ""), FILE)[0] == "unverified"         # nothing quoted
-    assert check_citation(cited(2, "path"), FILE)[0] == "unverified"     # on lines 3 and 4
+    assert check_citation(cited(6, ""), FILE)[0] == "unverified"           # nothing quoted
+    assert check_citation(cited(2, "path"), FILE)[0] == "unverified"       # on lines 3 and 4
     assert check_citation(cited(1, "import os"), None)[0] == "unverified"  # no such file
 
 
 def test_invalid_output_asks_for_a_retry_instead_of_crashing():
-    result = SimpleNamespace(subtype="success", is_error=False,
-                             structured_output={"findings": [{"file": "a.py"}]})
-    output, verified, unverified, problems = check_output(result, lambda path: FILE)
-    assert output is None and "validation" in problems[0]
+    result = ResultMessage(subtype="success", duration_ms=0, duration_api_ms=0, is_error=False,
+                           num_turns=1, session_id="s", structured_output={"findings": [{"file": "a.py"}]})
+    checked = check_output(result, lambda _path: FILE)
+    assert checked.output is None and "validation" in checked.problems[0]
 
 
-def test_file_reader_keeps_dotted_directories(tmp_path):
+def test_file_reader_keeps_dotted_directories(tmp_path: Path):
     (tmp_path / ".github").mkdir()
-    (tmp_path / ".github" / "ci.yml").write_text("on: push\n")
+    _ = (tmp_path / ".github" / "ci.yml").write_text("on: push\n")
     read = file_reader(str(tmp_path), None, None)
     assert read("./.github/ci.yml") == ["on: push"]
     assert read("../outside.txt") is None

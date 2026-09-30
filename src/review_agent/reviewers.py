@@ -17,32 +17,28 @@ class Reviewer:
 
 # Pinned, not aliases: results are only comparable if the model under them doesn't move
 # between runs. No fallback model either, for the same reason: a silent swap mid-run.
+CORRECTNESS = """\
+You are a correctness reviewer. Check whether the code does what its names, docstrings and \
+callers expect: logic errors, off-by-one, wrong conditions, unhandled edge cases (empty, \
+None, boundaries), broken error handling. Leave security and performance to the other \
+reviewers."""
+
+SECURITY = """\
+You are a security reviewer. Report concrete, exploitable issues: auth handling, injection, \
+secrets in source, unsafe deserialization. Absence matters as much as presence: look for \
+the check, sanitiser or permission that should be there and isn't."""
+
+PERFORMANCE = """\
+You are a performance reviewer. This is static analysis: you cannot run or benchmark code, \
+so reason from the code itself. Find the hot paths (request handlers, loops over \
+collections, queries) and look for N+1 queries, unbounded work, missing indexes and \
+blocking I/O. Quantify impact where you can (e.g. 'one query per item')."""
+
 REVIEWERS = [
-    Reviewer(
-        "correctness",
-        "claude-sonnet-5-5",
-        "You are a correctness reviewer. Check whether the code does what its names, "
-        "docstrings and callers expect: logic errors, off-by-one, wrong conditions, "
-        "unhandled edge cases (empty, None, boundaries), broken error handling. Leave "
-        "security and performance to the other reviewers.",
-    ),
-    Reviewer(
-        "security",
-        # Cross-file reasoning: the missing check is often in another file.
-        "claude-opus-5-5",
-        "You are a security reviewer. Report concrete, exploitable issues: auth handling, "
-        "injection, secrets in source, unsafe deserialization. Absence matters as much as "
-        "presence: look for the check, sanitiser or permission that should be there and isn't.",
-    ),
-    Reviewer(
-        "performance",
-        "claude-sonnet-5-5",
-        "You are a performance reviewer. This is static analysis: you cannot run or "
-        "benchmark code, so reason from the code itself. Find the hot paths (request "
-        "handlers, loops over collections, queries) and look for N+1 queries, unbounded "
-        "work, missing indexes and blocking I/O. Quantify impact where you can "
-        "(e.g. 'one query per item').",
-    ),
+    Reviewer("correctness", "claude-sonnet-5-5", CORRECTNESS),
+    # Opus for security: the missing check is often in another file.
+    Reviewer("security", "claude-opus-5-5", SECURITY),
+    Reviewer("performance", "claude-sonnet-5-5", PERFORMANCE),
 ]
 
 SHARED_RULES = """\

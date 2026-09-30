@@ -7,16 +7,38 @@ performance — and merges their findings into one structured report.
 A reference implementation built to learn the SDK properly, then hardened. Not a
 production system.
 
-## Run
+## Install and run
+
+Needs Python 3.11+, [uv](https://docs.astral.sh/uv/), and the Claude Code CLI, which the
+Agent SDK drives (logged in, or `ANTHROPIC_API_KEY` set).
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install claude-agent-sdk
-export ANTHROPIC_API_KEY=sk-ant-...
-python -m review_agent ./some/repo main HEAD
+uv tool install .
+review-agent ./some/repo main HEAD         # review the commits in main..HEAD
+review-agent ./some/repo                   # review the whole repository
+review-agent ./some/repo main HEAD --log runs/reviews.jsonl
 ```
 
-It exits non-zero unless all three reviewers finished. Tests: `pip install pytest && pytest`.
+It exits non-zero unless all three reviewers finished. `--log` appends one line per run
+with the outcome, counts and cost per reviewer, never code or file names.
+
+## Develop
+
+```bash
+uv sync                  # creates .venv with the package and dev tools
+uv run pytest            # unit tests, no network
+uv run basedpyright      # type check
+uv run review-agent --help
+```
+
+```text
+src/review_agent/
+├── cli.py        # the review-agent command
+├── review.py     # runs the three reviewers in parallel, checks and merges their output
+├── reviewers.py  # what each reviewer looks for, its model, and the rules they share
+├── findings.py   # the findings schema, the citation check, and the merge rules
+└── diff.py       # the get_changed_files tool
+```
 
 ## Decisions so far
 

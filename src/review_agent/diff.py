@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
 
-from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
+from claude_agent_sdk import McpSdkServerConfig, ToolAnnotations, create_sdk_mcp_server, tool
 
 GIT_TOOL = "mcp__git__get_changed_files"
 # Stays well under the CLI's cap on MCP tool output (MAX_MCP_OUTPUT_TOKENS, pinned in
 # review.py), so the note about what was left out is always what the reviewer sees.
 MAX_DIFF_CHARS = 60_000
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+DESCRIPTION = """\
+Get the diff for a commit range in the repository under review: a --stat summary, then \
+the patch for base..head with the new file's line number on every line. Both refs are git \
+refs (SHA, branch, tag, or expressions like HEAD~3). Large diffs include whole files until \
+a size budget and list the files left out; pass path to get one file's diff. Use Read for \
+full file context."""
+
+ToolResult = dict[str, object]
 
 
 def number_lines(patch: str) -> str:
@@ -21,7 +29,8 @@ def number_lines(patch: str) -> str:
     The model then reads line numbers instead of working them out from hunk headers,
     which is where wrong citations came from. Removed lines get no number.
     """
-    out, n = [], None
+    out: list[str] = []
+    n: int | None = None
     for line in patch.splitlines():
         hunk = HUNK_RE.match(line)
         if line.startswith("diff --git "):
@@ -52,7 +61,9 @@ def split_files(patch: str) -> list[tuple[str, str]]:
 
 def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[str, list[str]]:
     """Whole files until the budget is spent, never part of one. Returns (text, left out)."""
-    parts, left_out, used = [], [], 0
+    parts: list[str] = []
+    left_out: list[str] = []
+    used = 0
     for path, text in files:
         if used + len(text) <= budget:
             parts.append(text)
@@ -62,7 +73,7 @@ def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[st
     return "\n".join(parts), left_out
 
 
-def _text(text: str) -> dict[str, Any]:
+def _text(text: str) -> ToolResult:
     return {"content": [{"type": "text", "text": text}]}
 
 
@@ -73,19 +84,16 @@ async def _git(repo_path: str, *args: str) -> tuple[int, str, str]:
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     out, err = await proc.communicate()
-    return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+    code = await proc.wait()  # already exited; wait() gives the code as an int
+    return code, out.decode(errors="replace"), err.decode(errors="replace")
 
 
-def build_git_server(repo_path: str):
+def build_git_server(repo_path: str) -> McpSdkServerConfig:
     """The tool closes over repo_path so the model can't point it at another repo."""
 
     @tool(
         "get_changed_files",
-        "Get the diff for a commit range in the repository under review: a --stat summary, "
-        "then the patch for base..head with the new file's line number on every line. Both "
-        "refs are git refs (SHA, branch, tag, or expressions like HEAD~3). Large diffs include "
-        "whole files until a size budget and list the files left out; pass path to get one "
-        "file's diff. Use Read for full file context.",
+        DESCRIPTION,
         {
             "type": "object",
             "properties": {
@@ -97,43 +105,38 @@ def build_git_server(repo_path: str):
         },
         annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
     )
-    async def get_changed_files(args: dict[str, Any]) -> dict[str, Any]:
+    async def get_changed_files(args: dict[str, object]) -> ToolResult:
         # Validate instead of indexing: a KeyError here would crash the tool call
         # instead of telling the model how to fix it. This text becomes its next prompt.
         refs: dict[str, str] = {}
         for name in ("base", "head"):
             value = args.get(name)
             if not isinstance(value, str) or not value.strip():
-                return _text(
-                    f"Missing '{name}'. Pass both base and head as git refs, e.g. "
-                    "base='main', head='HEAD' or base='HEAD~1', head='HEAD'."
-                )
+                return _text(f"Missing '{name}'. Pass both base and head as git refs, e.g. base='main', head='HEAD' or base='HEAD~1', head='HEAD'.")
             value = value.strip()
             if value.startswith("-"):
                 return _text(f"'{name}' must be a git ref, not an option: {value!r}.")
             refs[name] = value
-        path = args.get("path")
-        if path is not None and (not isinstance(path, str) or not path.strip() or path.startswith("-")):
+        raw_path = args.get("path")
+        if raw_path is not None and (not isinstance(raw_path, str) or not raw_path.strip() or raw_path.startswith("-")):
             return _text("'path' must be a file path from the --stat summary, or omitted.")
+        path = raw_path.strip() if isinstance(raw_path, str) else None
 
         for name, ref in refs.items():
             code, _, _ = await _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
             if code != 0:
                 _, branches, _ = await _git(repo_path, "branch", "--format=%(refname:short)")
                 known = ", ".join(branches.split()[:20]) or "(none)"
-                return _text(
-                    f"'{name}' ref {ref!r} does not resolve to a commit. Local branches: "
-                    f"{known}. Use a branch name, a SHA, or a relative ref like HEAD~1."
-                )
+                return _text(f"'{name}' ref {ref!r} does not resolve to a commit. Local branches: {known}. Use a branch name, a SHA, or a relative ref like HEAD~1.")
 
         commit_range = f"{refs['base']}..{refs['head']}"
-        scope = ["--", path.strip()] if path else []
+        scope = ["--", path] if path else []
         code, stat, err = await _git(repo_path, "diff", "--stat", commit_range, *scope)
         if code != 0:
             return _text(f"git diff failed for {commit_range}: {err.strip()}")
         if not stat.strip():
-            return _text(f"No changes between {refs['base']} and {refs['head']}"
-                         + (f" in {path}." if path else "."))
+            where = f" in {path}" if path else ""
+            return _text(f"No changes between {refs['base']} and {refs['head']}{where}.")
 
         code, patch, err = await _git(repo_path, "diff", commit_range, *scope)
         if code != 0:
@@ -142,15 +145,13 @@ def build_git_server(repo_path: str):
 
         if path:  # one file: cut only if that single file is over budget
             if len(numbered) > MAX_DIFF_CHARS:
-                numbered = numbered[:MAX_DIFF_CHARS] + (
-                    f"\n\n[cut at {MAX_DIFF_CHARS} chars; Read {path} for the rest.]")
+                numbered = f"{numbered[:MAX_DIFF_CHARS]}\n\n[cut at {MAX_DIFF_CHARS} chars; Read {path} for the rest.]"
             return _text(f"{stat}\n{numbered}")
 
         body, left_out = pack(split_files(numbered))
         if left_out:
-            body += ("\n\n[Not included, over the size budget: " + ", ".join(left_out)
-                     + ". Call get_changed_files again with path set to one of them, "
-                     "or Read the file.]")
+            names = ", ".join(left_out)
+            body += f"\n\n[Not included, over the size budget: {names}. Call get_changed_files again with path set to one of them, or Read the file.]"
         return _text(f"{stat}\n{body}")
 
     return create_sdk_mcp_server(name="git", version="1.0.0", tools=[get_changed_files])
