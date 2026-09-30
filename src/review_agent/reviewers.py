@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
 
 
@@ -10,9 +12,23 @@ class Reviewer:
     name: str   # also the category of every finding it reports
     model: str
     focus: str
+    budget_usd: float  # default spend cap; REVIEW_AGENT_<NAME>_BUDGET_USD overrides it
 
     def system_prompt(self) -> str:
         return self.focus + "\n\n" + SHARED_RULES
+
+    def budget(self) -> float:
+        var = f"REVIEW_AGENT_{self.name.upper()}_BUDGET_USD"
+        raw = os.environ.get(var)
+        if raw is None:
+            return self.budget_usd
+        try:
+            value = float(raw)
+        except ValueError:
+            value = math.nan
+        if not (math.isfinite(value) and value > 0):
+            raise ValueError(f"{var} must be a positive number of dollars, got {raw!r}")
+        return value
 
 
 # Pinned, not aliases: results are only comparable if the model under them doesn't move
@@ -35,10 +51,11 @@ collections, queries) and look for N+1 queries, unbounded work, missing indexes 
 blocking I/O. Quantify impact where you can (e.g. 'one query per item')."""
 
 REVIEWERS = [
-    Reviewer("correctness", "claude-sonnet-5-5", CORRECTNESS),
-    # Opus for security: the missing check is often in another file.
-    Reviewer("security", "claude-opus-5-5", SECURITY),
-    Reviewer("performance", "claude-sonnet-5-5", PERFORMANCE),
+    Reviewer("correctness", "claude-sonnet-5-5", CORRECTNESS, budget_usd=2.0),
+    # Opus for security: the missing check is often in another file. Opus also costs
+    # more per token and reads more files, hence the larger budget.
+    Reviewer("security", "claude-opus-5-5", SECURITY, budget_usd=4.0),
+    Reviewer("performance", "claude-sonnet-5-5", PERFORMANCE, budget_usd=2.0),
 ]
 
 SHARED_RULES = """\

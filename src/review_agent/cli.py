@@ -1,6 +1,7 @@
 """The review-agent command.
 
-Exits 0 when all three reviewers finished, 1 when any of them didn't.
+Exits 0 when all three reviewers finished, 1 when any of them didn't, 2 on an invalid
+budget override.
 """
 
 from __future__ import annotations
@@ -8,9 +9,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 from pathlib import Path
 
 from .review import Report, record, run_review
+from .reviewers import REVIEWERS
 
 
 class Args(argparse.Namespace):
@@ -51,6 +54,12 @@ def print_report(report: Report) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    try:  # a bad budget override must stop the run before anything is spent
+        for r in REVIEWERS:
+            _ = r.budget()
+    except ValueError as e:
+        print(f"review-agent: {e}", file=sys.stderr)
+        return 2
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     report = asyncio.run(run_review(args.repo, args.base, args.head))
     if args.log:

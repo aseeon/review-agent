@@ -102,7 +102,7 @@ def build_options(reviewer: Reviewer, repo_path: str) -> ClaudeAgentOptions:
         output_format={"type": "json_schema", "schema": ReviewerOutput.model_json_schema()},
         model=reviewer.model,
         max_turns=25,
-        max_budget_usd=1.50,
+        max_budget_usd=reviewer.budget(),
         env={
             "API_TIMEOUT_MS": "120000",
             "CLAUDE_CODE_MAX_RETRIES": "2",

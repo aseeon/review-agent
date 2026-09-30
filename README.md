@@ -43,10 +43,12 @@ review of main..HEAD: complete, severity high, 2 findings
     ...
 ```
 
-- **Cost.** Each reviewer stops at $1.50, so a run costs at most $4.50. The report shows
-  what each reviewer spent.
-- **Exit code.** It exits 0 when all three reviewers finished and 1 otherwise, so it
-  can gate a CI step.
+- **Cost.** Each reviewer stops at its budget: security $4, correctness $2, performance $2,
+  so a run costs at most $8. Override per reviewer with `REVIEW_AGENT_SECURITY_BUDGET_USD`,
+  `REVIEW_AGENT_CORRECTNESS_BUDGET_USD` and `REVIEW_AGENT_PERFORMANCE_BUDGET_USD`. The
+  report shows what each reviewer spent.
+- **Exit code.** 0 when all three reviewers finished, 1 otherwise, so it can gate a CI
+  step. An invalid budget override exits 2 before anything is spent.
 - **Run log.** The `--log` record holds the outcome, counts and cost per reviewer. It
   never contains code or file names.
 
@@ -65,8 +67,8 @@ review of main..HEAD: complete, severity high, 2 findings
 - **Visible failures.** A reviewer that fails (budget, turns, invalid output) marks the
   run `partial` and shows the reason.
 
-Reviewer prompts and models are in `src/review_agent/reviewers.py`. Turn and budget
-limits are in `build_options` in `src/review_agent/review.py`.
+Reviewer prompts, models and default budgets are in `src/review_agent/reviewers.py`. The
+turn limit is in `build_options` in `src/review_agent/review.py`.
 
 ## Develop
 
