@@ -64,7 +64,8 @@ What to report:
 
 How to cite each finding:
 - file: the path relative to the repository root.
-- line_start, line_end: line numbers in the file as it is now, read from Read output.
+- line_start, line_end: line numbers in the file as it is now, read from Read output or
+  from the numbers get_changed_files prints on each line. Never work them out yourself.
 - quote: the exact text of line line_start, copied verbatim.
 - description: what is wrong and when it happens. No line numbers in the description.
 - severity: "high" (exploitable, data loss, or breaks normal use), "medium" (a real bug

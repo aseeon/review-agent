@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from claude_agent_sdk import (
 from pydantic import ValidationError
 
 from .diff import GIT_TOOL, build_git_server
-from .findings import ReviewerOutput, merge, overall_severity
+from .findings import Finding, ReviewerOutput, check_citation, merge, overall_severity
 from .reviewers import REVIEWERS, Reviewer
 
 log = logging.getLogger("review")
@@ -63,6 +65,9 @@ def build_options(reviewer: Reviewer, repo_path: str) -> ClaudeAgentOptions:
         env={
             "API_TIMEOUT_MS": "120000",
             "CLAUDE_CODE_MAX_RETRIES": "2",
+            # Pinned like the models: the CLI's default cap on tool output can change
+            # under us. diff.py stays well below it.
+            "MAX_MCP_OUTPUT_TOKENS": "25000",
         },
     )
 
@@ -91,30 +96,89 @@ async def collect(client: ClaudeSDKClient, name: str, stats: dict[str, Any]) -> 
     return result
 
 
-def parse(result: ResultMessage) -> ReviewerOutput:
+def file_reader(repo_path: str, base: str | None, head: str | None) -> Callable[[str], list[str] | None]:
+    """Lines of a file as reviewed: at head for a commit range, else the working tree."""
+    root = Path(repo_path).resolve()
+    cache: dict[str, list[str] | None] = {}
+
+    def read(path: str) -> list[str] | None:
+        path = path.replace("\\", "/").removeprefix("./")
+        if path not in cache:
+            if base:
+                r = subprocess.run(["git", "show", f"{head or 'HEAD'}:{path}"], cwd=root, capture_output=True)
+                cache[path] = r.stdout.decode(errors="replace").splitlines() if r.returncode == 0 else None
+            else:
+                file = (root / path).resolve()
+                ok = file.is_relative_to(root) and file.is_file()
+                cache[path] = file.read_text(errors="replace").splitlines() if ok else None
+        return cache[path]
+
+    return read
+
+
+def check_output(result: ResultMessage, read: Callable[[str], list[str] | None]):
+    """Validate one reviewer answer.
+
+    Returns (output, verified, unverified, problems to send back); output is None when
+    the answer failed validation.
+
+    Budget, turn and structured-output failures raise: the reviewer didn't finish.
+    """
     if result.subtype in FAILURES:
         raise ReviewerFailed(FAILURES[result.subtype])
     if result.is_error:
         raise ReviewerFailed(f"{result.subtype}: {result.errors or result.result}")
     try:
-        return ReviewerOutput.model_validate(result.structured_output)
+        output = ReviewerOutput.model_validate(result.structured_output)
     except ValidationError as e:
-        raise ReviewerFailed(f"invalid output: {e.error_count()} validation errors") from e
+        return None, [], [], [f"Your output failed validation:\n{e}"]
+    verified: list[Finding] = []
+    unverified: list[Finding] = []
+    problems: list[str] = []
+    for f in output.findings:
+        lines = read(f.file)
+        status, checked = check_citation(f, lines)
+        if status == "unverified":
+            unverified.append(f)
+            where = ("that file doesn't exist in the reviewed code" if lines is None
+                     else f"the file has {len(lines)} lines" if f.line_start > len(lines)
+                     else "the quote isn't on those lines")
+            problems.append(f"{f.file}:{f.line_start}-{f.line_end} ({where}).")
+        else:
+            if status == "relocated":
+                log.info("relocated %s:%d -> %d", f.file, f.line_start, checked.line_start)
+            verified.append(checked)
+    return output, verified, unverified, problems
+
+
+FEEDBACK = (
+    "Some of your output needs fixing. For each finding below, Read the file and correct "
+    "line_start, line_end and quote, or drop the finding if it doesn't hold. Return the "
+    "complete output again, all findings included.\n"
+)
 
 
 async def run_reviewer(reviewer: Reviewer, repo_path: str, base: str | None, head: str | None) -> dict[str, Any]:
     stats: dict[str, Any] = {"model": reviewer.model, "tool_calls": 0, "cost_usd": 0.0, "turns": 0}
+    read = file_reader(repo_path, base, head)
     try:
         async with ClaudeSDKClient(options=build_options(reviewer, repo_path)) as client:
             await client.query(task(base, head))
-            output = parse(await collect(client, reviewer.name, stats))
+            output, verified, unverified, problems = check_output(await collect(client, reviewer.name, stats), read)
+            if problems:  # one round of feedback, then take what we have
+                log.info("%s: sending back %d problems", reviewer.name, len(problems))
+                await client.query(FEEDBACK + "\n".join(f"- {p}" for p in problems))
+                output, verified, unverified, _ = check_output(await collect(client, reviewer.name, stats), read)
+                if output is None:
+                    raise ReviewerFailed("invalid output after one retry")
     except ReviewerFailed as e:
         return {**stats, "status": "failed", "error": str(e)}
-    findings = [f.model_copy(update={"category": reviewer.name}) for f in output.findings]
+    tag = {"category": reviewer.name}
     return {
         **stats,
         "status": "ok",
-        "findings": findings,
+        "findings": [f.model_copy(update=tag) for f in verified],
+        "unverified": [f.model_copy(update=tag) for f in unverified],
         "files_reviewed": output.files_reviewed,
         "files_skipped": [s.model_dump() for s in output.files_skipped],
     }
@@ -126,11 +190,13 @@ async def run_review(repo_path: str, base: str | None = None, head: str | None =
         return_exceptions=True,  # one reviewer crashing must not erase the others
     )
     reviewers: dict[str, dict[str, Any]] = {}
-    found = []
+    found: list[Finding] = []
+    unverified: list[Finding] = []
     for reviewer, result in zip(REVIEWERS, results):
         if isinstance(result, BaseException):
             result = {"model": reviewer.model, "status": "failed", "error": repr(result)}
         found += result.pop("findings", [])
+        unverified += result.pop("unverified", [])
         reviewers[reviewer.name] = result
 
     kept, dropped = merge(found)
@@ -142,6 +208,8 @@ async def run_review(repo_path: str, base: str | None = None, head: str | None =
         "severity": overall_severity(kept),
         "findings": [f.model_dump() for f in kept],
         "dropped_by_cap": dropped,
+        # Citations that still didn't match after one retry: shown, never counted.
+        "unverified": [f.model_dump() for f in unverified],
         "reviewers": reviewers,
     }
     record(report)
@@ -157,6 +225,7 @@ def record(report: dict[str, Any]) -> None:
         "status": report["status"],
         "severity": report["severity"],
         "findings": len(report["findings"]),
+        "unverified": len(report["unverified"]),
         "reviewers": {
             name: {k: r.get(k) for k in ("status", "model", "tool_calls", "turns", "cost_usd", "error")}
             for name, r in report["reviewers"].items()

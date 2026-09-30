@@ -56,6 +56,22 @@ It exits non-zero unless all three reviewers finished. Tests: `pip install pytes
 - **The diff is the anchor, not the boundary.** Reviewers start from the changed hunks
   and read whatever the change depends on, because most real defects (a missing auth
   check, a query inside a caller's loop) are invisible in the diff alone.
+- **Every citation is checked in code.** Each finding quotes the line it cites. Code
+  looks for that text at those lines in the reviewed version of the file. If it's there,
+  fine; if it appears exactly once elsewhere, the line numbers are corrected; otherwise the
+  reviewer is told what didn't match and gets one retry. What still doesn't match is shown
+  as unverified and doesn't count towards the severity. A string match can't hallucinate,
+  so this is done deterministically rather than by asking a model to re-check.
+- **Line numbers are printed, not computed.** `get_changed_files` puts the new file's line
+  number on every diff line, so reviewers read numbers instead of working them out from
+  hunk headers, which is where wrong citations came from.
+- **Large diffs are packed by whole file.** Files are included until a size budget, never
+  cut in the middle, and the ones left out are listed by name; a `path` argument fetches
+  one file's diff. The budget sits well under the CLI's own cap on tool output, which is
+  set explicitly (`MAX_MCP_OUTPUT_TOKENS`) rather than left to a default.
+- **Invalid output gets one retry, then fails loudly.** Schema errors and unmatched
+  citations are sent back once. A reviewer that still can't produce valid output, or runs
+  out of budget or turns, is marked failed with the reason.
 - **Performance review is static analysis.** The reviewer cannot execute code. Running
   benchmarks would need a sandboxed execution path, and read-only was chosen on purpose.
 
@@ -70,6 +86,10 @@ It exits non-zero unless all three reviewers finished. Tests: `pip install pytes
 
 ## Known limitations
 
-- Line numbers in findings are taken on trust; nothing checks them against the file yet.
-- A diff larger than 100k characters is truncated.
+- A reviewer's findings arrive only when it finishes, so one that runs out of budget
+  contributes nothing; the run is marked partial rather than showing partial findings.
+- A citation is checked against its first non-empty quoted line; a quote that is common
+  code (e.g. `return None`) can only be verified at its exact line, never relocated.
+- Packing is in git's file order, so on a very large change the files left out are
+  simply the later ones, not the least relevant ones.
 - There is no eval harness yet.

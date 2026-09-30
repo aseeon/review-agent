@@ -41,6 +41,25 @@ class ReviewerOutput(BaseModel):
     files_skipped: list[SkippedFile] = []
 
 
+def check_citation(f: Finding, lines: list[str] | None) -> tuple[str, Finding]:
+    """Is the quoted code at the cited lines? Returns (status, finding).
+
+    "ok": it's there. "relocated": the quote appears exactly once elsewhere in the file,
+    so the lines are corrected. "unverified": the file is missing, or the quote is absent
+    or ambiguous. A string match either finds the code or it doesn't; it can't guess.
+    """
+    quote = next((line.strip() for line in f.quote.splitlines() if line.strip()), "")
+    if lines is None or not quote:
+        return "unverified", f
+    if any(quote in line for line in lines[f.line_start - 1 : f.line_end]):
+        return "ok", f
+    hits = [i for i, line in enumerate(lines, 1) if quote in line]
+    if len(hits) == 1:
+        shift = hits[0] - f.line_start
+        return "relocated", f.model_copy(update={"line_start": hits[0], "line_end": f.line_end + shift})
+    return "unverified", f
+
+
 def _rank(f: Finding) -> tuple[int, bool]:
     return SEVERITY_RANK[f.severity], f.confidence == "confirmed"
 

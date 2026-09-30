@@ -3,12 +3,63 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from claude_agent_sdk import ToolAnnotations, create_sdk_mcp_server, tool
 
 GIT_TOOL = "mcp__git__get_changed_files"
-MAX_DIFF_CHARS = 100_000  # keep one tool result from eating the context window
+# Stays well under the CLI's cap on MCP tool output (MAX_MCP_OUTPUT_TOKENS, pinned in
+# review.py), so the note about what was left out is always what the reviewer sees.
+MAX_DIFF_CHARS = 60_000
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def number_lines(patch: str) -> str:
+    """Prefix every line that exists in the new file with its line number.
+
+    The model then reads line numbers instead of working them out from hunk headers,
+    which is where wrong citations came from. Removed lines get no number.
+    """
+    out, n = [], None
+    for line in patch.splitlines():
+        hunk = HUNK_RE.match(line)
+        if line.startswith("diff --git "):
+            n = None
+            out.append(line)
+        elif hunk:
+            n = int(hunk.group(1))
+            out.append(line)
+        elif n is None or line.startswith("\\"):
+            out.append(line)  # file header, or "\ No newline at end of file"
+        elif line.startswith("-"):
+            out.append(f"{'':>6} {line}")
+        else:
+            out.append(f"{n:>6} {line}")
+            n += 1
+    return "\n".join(out)
+
+
+def split_files(patch: str) -> list[tuple[str, str]]:
+    """[(path, that file's diff)] in the order git printed them."""
+    files: list[tuple[str, str]] = []
+    for chunk in re.split(r"(?m)^(?=diff --git )", patch):
+        if chunk.startswith("diff --git "):
+            path = chunk.split("\n", 1)[0].split(" b/", 1)[-1]
+            files.append((path, chunk.rstrip("\n")))
+    return files
+
+
+def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[str, list[str]]:
+    """Whole files until the budget is spent, never part of one. Returns (text, left out)."""
+    parts, left_out, used = [], [], 0
+    for path, text in files:
+        if used + len(text) <= budget:
+            parts.append(text)
+            used += len(text) + 1
+        else:
+            left_out.append(path)
+    return "\n".join(parts), left_out
 
 
 def _text(text: str) -> dict[str, Any]:
@@ -30,11 +81,20 @@ def build_git_server(repo_path: str):
 
     @tool(
         "get_changed_files",
-        "Get the diff for a commit range in the repository under review: a --stat summary "
-        "followed by the full patch for base..head. Both arguments are git refs (SHA, branch, "
-        "tag, or expressions like HEAD~3). Use this to scope a review to what changed; use "
-        "Read for full file context.",
-        {"base": str, "head": str},
+        "Get the diff for a commit range in the repository under review: a --stat summary, "
+        "then the patch for base..head with the new file's line number on every line. Both "
+        "refs are git refs (SHA, branch, tag, or expressions like HEAD~3). Large diffs include "
+        "whole files until a size budget and list the files left out; pass path to get one "
+        "file's diff. Use Read for full file context.",
+        {
+            "type": "object",
+            "properties": {
+                "base": {"type": "string"},
+                "head": {"type": "string"},
+                "path": {"type": "string", "description": "Optional: one changed file's path."},
+            },
+            "required": ["base", "head"],
+        },
         annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
     )
     async def get_changed_files(args: dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +112,9 @@ def build_git_server(repo_path: str):
             if value.startswith("-"):
                 return _text(f"'{name}' must be a git ref, not an option: {value!r}.")
             refs[name] = value
+        path = args.get("path")
+        if path is not None and (not isinstance(path, str) or not path.strip() or path.startswith("-")):
+            return _text("'path' must be a file path from the --stat summary, or omitted.")
 
         for name, ref in refs.items():
             code, _, _ = await _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
@@ -64,22 +127,30 @@ def build_git_server(repo_path: str):
                 )
 
         commit_range = f"{refs['base']}..{refs['head']}"
-        code, stat, err = await _git(repo_path, "diff", "--stat", commit_range)
+        scope = ["--", path.strip()] if path else []
+        code, stat, err = await _git(repo_path, "diff", "--stat", commit_range, *scope)
         if code != 0:
             return _text(f"git diff failed for {commit_range}: {err.strip()}")
         if not stat.strip():
-            return _text(f"No changes between {refs['base']} and {refs['head']}.")
+            return _text(f"No changes between {refs['base']} and {refs['head']}"
+                         + (f" in {path}." if path else "."))
 
-        code, patch, err = await _git(repo_path, "diff", commit_range)
+        code, patch, err = await _git(repo_path, "diff", commit_range, *scope)
         if code != 0:
             return _text(f"git diff failed for {commit_range}: {err.strip()}")
-        body = f"{stat}\n{patch}"
-        if len(body) > MAX_DIFF_CHARS:
-            body = (
-                body[:MAX_DIFF_CHARS]
-                + f"\n\n[truncated at {MAX_DIFF_CHARS} chars. The --stat summary at the top "
-                "lists every changed file; Read those files, or narrow the range.]"
-            )
-        return _text(body)
+        numbered = number_lines(patch)
+
+        if path:  # one file: cut only if that single file is over budget
+            if len(numbered) > MAX_DIFF_CHARS:
+                numbered = numbered[:MAX_DIFF_CHARS] + (
+                    f"\n\n[cut at {MAX_DIFF_CHARS} chars; Read {path} for the rest.]")
+            return _text(f"{stat}\n{numbered}")
+
+        body, left_out = pack(split_files(numbered))
+        if left_out:
+            body += ("\n\n[Not included, over the size budget: " + ", ".join(left_out)
+                     + ". Call get_changed_files again with path set to one of them, "
+                     "or Read the file.]")
+        return _text(f"{stat}\n{body}")
 
     return create_sdk_mcp_server(name="git", version="1.0.0", tools=[get_changed_files])

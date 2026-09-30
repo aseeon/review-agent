@@ -29,6 +29,9 @@ def main() -> int:
               f"  ({f['confidence']})\n    {f['description']}")
         if f["suggested_fix"]:
             print(f"    fix: {f['suggested_fix']}")
+    for f in report["unverified"]:
+        print(f"\n[unverified: cited code not found] {f['category']}  {f['file']}:{f['line_start']}"
+              f"\n    {f['description']}")
     if report["dropped_by_cap"]:
         print(f"\n{report['dropped_by_cap']} lower-ranked findings dropped by the cap.")
     return 0 if report["status"] == "complete" else 1

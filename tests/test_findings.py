@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from review_agent.findings import MAX_FINDINGS, Finding, ReviewerOutput, merge, overall_severity
+from types import SimpleNamespace
+
+from review_agent.findings import (
+    MAX_FINDINGS, Finding, ReviewerOutput, check_citation, merge, overall_severity,
+)
+from review_agent.review import check_output, file_reader
+
+FILE = ["import os", "", "def load(path):", "    return open(path).read()", "", "x = 1"]
 
 
 def finding(category="security", file="a.py", start=10, end=None, severity="low", confidence="confirmed"):
@@ -48,3 +55,42 @@ def test_schema_rejects_what_the_prompt_forbids():
 
 def test_category_is_set_by_code_not_by_the_model():
     assert "category" not in str(ReviewerOutput.model_json_schema())
+
+
+def cited(start, quote, end=None):
+    return finding(start=start, end=end).model_copy(update={"quote": quote})
+
+
+def test_citation_found_at_the_cited_line():
+    assert check_citation(cited(4, "return open(path).read()"), FILE)[0] == "ok"
+
+
+def test_citation_relocated_when_the_quote_is_unique_elsewhere():
+    status, f = check_citation(cited(1, "def load(path):", end=2), FILE)
+    assert status == "relocated" and (f.line_start, f.line_end) == (3, 4)
+
+
+def test_citation_past_the_end_of_the_file_is_relocated_or_unverified():
+    assert check_citation(cited(1680, "def load(path):"), FILE)[0] == "relocated"
+    assert check_citation(cited(1680, "not in the file"), FILE)[0] == "unverified"
+
+
+def test_ambiguous_or_missing_citations_are_unverified():
+    assert check_citation(cited(6, ""), FILE)[0] == "unverified"         # nothing quoted
+    assert check_citation(cited(2, "path"), FILE)[0] == "unverified"     # on lines 3 and 4
+    assert check_citation(cited(1, "import os"), None)[0] == "unverified"  # no such file
+
+
+def test_invalid_output_asks_for_a_retry_instead_of_crashing():
+    result = SimpleNamespace(subtype="success", is_error=False,
+                             structured_output={"findings": [{"file": "a.py"}]})
+    output, verified, unverified, problems = check_output(result, lambda path: FILE)
+    assert output is None and "validation" in problems[0]
+
+
+def test_file_reader_keeps_dotted_directories(tmp_path):
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "ci.yml").write_text("on: push\n")
+    read = file_reader(str(tmp_path), None, None)
+    assert read("./.github/ci.yml") == ["on: push"]
+    assert read("../outside.txt") is None
