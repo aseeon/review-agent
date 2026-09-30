@@ -39,11 +39,16 @@ FAILURES = {
     "error_max_structured_output_retries": "no valid structured output",
 }
 
-FEEDBACK = """\
-Some of your output needs fixing. For each finding below, Read the file and correct \
-line_start, line_end and quote, or drop the finding if it doesn't hold. Return the \
-complete output again, all findings included.
+CITATION_FEEDBACK = """\
+These findings cite code that isn't where they say. For each one, Read the file and correct \
+line_start, line_end and quote, or drop the finding if it doesn't hold. Return the complete \
+output again, all findings included.
 """
+
+SCHEMA_FEEDBACK = """\
+Your output didn't match the schema:
+{errors}
+Return the complete output again, all findings included."""
 
 LineReader = Callable[[str], "list[str] | None"]
 
@@ -114,9 +119,28 @@ def build_options(reviewer: Reviewer, repo_path: str) -> ClaudeAgentOptions:
 
 
 def task(base: str | None, head: str | None) -> str:
+    """The first message: this run's steps and the finish line, which depend on the mode."""
     if base:
-        return f"Review the changes between {base} and {head or 'HEAD'}."
-    return "Review this repository."
+        head = head or "HEAD"
+        return f"""\
+Review the changes between {base} and {head}.
+1. Call get_changed_files with base="{base}" and head="{head}". Its --stat summary lists every changed file.
+2. Review each changed file. Fetch any file left out of the first result with the path argument.
+3. Report defects in, or caused by, these changes.
+You are done when every file in the --stat summary is in files_reviewed, or in files_skipped with the reason."""
+    return """\
+Review this repository.
+1. Glob for the source files.
+2. Start from the entry points and the most-used modules, and follow what they call.
+3. Report defects anywhere in the code.
+You are done when every source file is in files_reviewed, or in files_skipped with the reason."""
+
+
+def feedback(checked: Checked) -> str:
+    """What to send back for one retry. A schema failure and bad citations need different fixes."""
+    if checked.output is None:
+        return SCHEMA_FEEDBACK.format(errors=checked.problems[0])
+    return CITATION_FEEDBACK + "\n".join(f"- {p}" for p in checked.problems)
 
 
 async def collect(client: ClaudeSDKClient, name: str, run: ReviewerRun) -> ResultMessage:
@@ -169,7 +193,7 @@ def check_output(result: ResultMessage, read: LineReader) -> Checked:
     try:
         output = ReviewerOutput.model_validate(cast(object, result.structured_output))
     except ValidationError as e:
-        return Checked(None, [], [], [f"Your output failed validation:\n{e}"])
+        return Checked(None, [], [], [str(e)])
     checked = Checked(output, [], [], [])
     for f in output.findings:
         lines = read(f.file)
@@ -198,7 +222,7 @@ async def run_reviewer(reviewer: Reviewer, repo_path: str, base: str | None, hea
             checked = check_output(await collect(client, reviewer.name, run), read)
             if checked.problems:  # one round of feedback, then take what we have
                 log.info("%s: sending back %d problems", reviewer.name, len(checked.problems))
-                await client.query(FEEDBACK + "\n".join(f"- {p}" for p in checked.problems))
+                await client.query(feedback(checked))
                 retry = check_output(await collect(client, reviewer.name, run), read)
                 # An invalid retry must not throw away a valid first answer.
                 if retry.output is not None or checked.output is None:

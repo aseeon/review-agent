@@ -12,14 +12,29 @@ MAX_FINDINGS = 10  # per report; each reviewer is also asked for at most 5
 
 
 class Finding(BaseModel):
-    file: str
-    line_start: int = Field(ge=1)
-    line_end: int = Field(ge=1)
-    quote: str
-    severity: Literal["low", "medium", "high"]
-    confidence: Literal["confirmed", "suspected"]
-    description: str
-    suggested_fix: str = ""
+    # The descriptions are part of the schema the reviewer model is given: they are the
+    # single definition of each field. The prompt keeps only the judgement rules.
+    file: str = Field(description="Path relative to the repository root.")
+    line_start: int = Field(
+        ge=1,
+        description="First line of the defect, in the file as reviewed. Take it from Read output "
+        + "or from the line numbers get_changed_files prints.",
+    )
+    line_end: int = Field(ge=1, description="Last line of the defect; equal to line_start for one line.")
+    quote: str = Field(description="The text of line line_start, copied exactly.")
+    severity: Literal["low", "medium", "high"] = Field(
+        description="high: exploitable, loses data, or breaks normal use. medium: wrong behaviour "
+        + "under a realistic trigger. low: real but minor.",
+    )
+    confidence: Literal["confirmed", "suspected"] = Field(
+        description="confirmed: you read the code path that proves it. suspected: high impact but "
+        + "not proven; the description says what is uncertain.",
+    )
+    description: str = Field(
+        description="The defect and its trigger: the input, state or call path that makes it go "
+        + "wrong. The location belongs in file and the line fields.",
+    )
+    suggested_fix: str = Field(default="", description="The smallest change that fixes it.")
     # Set by code from the reviewer that reported it, so it's not in the model's schema.
     category: SkipJsonSchema[str] = ""
 
@@ -31,14 +46,14 @@ class Finding(BaseModel):
 
 
 class SkippedFile(BaseModel):
-    file: str
-    reason: str
+    file: str = Field(description="Path relative to the repository root.")
+    reason: str = Field(description="Why this file was not reviewed.")
 
 
 class ReviewerOutput(BaseModel):
-    findings: list[Finding]
-    files_reviewed: list[str] = []
-    files_skipped: list[SkippedFile] = []
+    findings: list[Finding] = Field(description="At most 5, most important first. Empty when there is nothing to report.")
+    files_reviewed: list[str] = Field(default=[], description="Every file you reviewed.")
+    files_skipped: list[SkippedFile] = Field(default=[], description="Every file in scope you did not review.")
 
 
 def check_citation(f: Finding, lines: list[str] | None) -> tuple[str, Finding]:
