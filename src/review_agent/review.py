@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import subprocess
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, NamedTuple, cast
@@ -248,7 +251,37 @@ def finish(run: ReviewerRun, category: str, checked: Checked) -> ReviewerRun:
     return run
 
 
+@contextmanager
+def snapshot(repo_path: str, head: str) -> Generator[str]:
+    """A temporary detached worktree at head, removed afterwards.
+
+    The diff covers base..head, but Read and Grep read files from disk. Reviewing inside a
+    checkout of head means everything a reviewer reads is the code under review, not
+    whatever the working tree has moved on to since.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="review-agent-"))
+    tree = tmp / "tree"
+    added = subprocess.run(["git", "worktree", "add", "--detach", str(tree), head],
+                           cwd=repo_path, capture_output=True, text=True)
+    if added.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise ValueError(f"can't check out {head!r} in {repo_path}: {added.stderr.strip()}")
+    try:
+        yield str(tree)
+    finally:
+        _ = subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo_path, capture_output=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def run_review(repo_path: str, base: str | None = None, head: str | None = None) -> Report:
+    """Review base..head inside a checkout of head, or the whole working tree without base."""
+    if base:
+        with snapshot(repo_path, head or "HEAD") as tree:
+            return await review_in(tree, base, head)
+    return await review_in(repo_path, None, None)
+
+
+async def review_in(repo_path: str, base: str | None, head: str | None) -> Report:
     results = await asyncio.gather(
         *(run_reviewer(r, repo_path, base, head) for r in REVIEWERS),
         return_exceptions=True,  # one reviewer crashing must not erase the others

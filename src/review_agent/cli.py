@@ -1,7 +1,7 @@
 """The review-agent command.
 
 Exits 0 when all three reviewers finished, 1 when any of them didn't, 2 on an invalid
-budget override.
+budget override or a commit that can't be checked out.
 """
 
 from __future__ import annotations
@@ -61,7 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review-agent: {e}", file=sys.stderr)
         return 2
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    report = asyncio.run(run_review(args.repo, args.base, args.head))
+    try:
+        report = asyncio.run(run_review(args.repo, args.base, args.head))
+    except ValueError as e:  # e.g. head isn't a commit in this repository
+        print(f"review-agent: {e}", file=sys.stderr)
+        return 2
     if args.log:
         record(report, args.log)
     print_report(report)
