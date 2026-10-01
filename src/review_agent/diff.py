@@ -17,8 +17,8 @@ DESCRIPTION = """\
 Get the diff for a commit range in the repository under review: a --stat summary, then \
 the patch for base..head with the new file's line number on every line. Both refs are git \
 refs (SHA, branch, tag, or expressions like HEAD~3). Large diffs include whole files until \
-a size budget and list the files left out; pass path to get one file's diff. Use Read for \
-full file context."""
+a size budget and list the files left out; pass path to get one file's diff. Cite the line \
+numbers it prints. Use Read for full file context."""
 
 ToolResult = dict[str, object]
 

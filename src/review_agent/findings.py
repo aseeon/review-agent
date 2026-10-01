@@ -21,7 +21,10 @@ class Finding(BaseModel):
         + "or from the line numbers get_changed_files prints.",
     )
     line_end: int = Field(ge=1, description="Last line of the defect; equal to line_start for one line.")
-    quote: str = Field(description="The text of line line_start, copied exactly.")
+    quote: str = Field(
+        description="The text of line line_start, copied exactly. Put line_start on the most "
+        + "specific line of the defect, one whose text appears only once in the file.",
+    )
     severity: Literal["low", "medium", "high"] = Field(
         description="high: exploitable, loses data, or breaks normal use. medium: wrong behaviour "
         + "under a realistic trigger. low: real but minor.",

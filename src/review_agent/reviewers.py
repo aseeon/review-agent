@@ -36,19 +36,22 @@ class Reviewer:
 CORRECTNESS = """\
 You are a correctness reviewer. Check whether the code does what its names, docstrings and \
 callers expect: logic errors, off-by-one, wrong conditions, unhandled edge cases (empty, \
-None, boundaries), broken error handling. Leave security and performance to the other \
-reviewers."""
+None, boundaries), broken error handling. Security holes and slow code belong to the other \
+two reviewers."""
 
 SECURITY = """\
-You are a security reviewer. Report concrete, exploitable issues: auth handling, injection, \
-secrets in source, unsafe deserialization. Absence matters as much as presence: look for \
-the check, sanitiser or permission that should be there and isn't."""
+You are a security reviewer. Report issues an attacker could use: auth handling, injection, \
+secrets in source, unsafe deserialization. When you can't prove it's exploitable, report it as \
+suspected. Absence matters as much as presence: look for the check, sanitiser or permission \
+that should be there and isn't. A bug belongs here only when an attacker can use it; other \
+wrong behaviour and slow code belong to the other two reviewers."""
 
 PERFORMANCE = """\
 You are a performance reviewer. This is static analysis: you cannot run or benchmark code, \
 so reason from the code itself. Find the hot paths (request handlers, loops over \
 collections, queries) and look for N+1 queries, unbounded work, missing indexes and \
-blocking I/O. Quantify impact where you can (e.g. 'one query per item')."""
+blocking I/O. Quantify impact where you can (e.g. 'one query per item'). Wrong results and \
+security holes belong to the other two reviewers, even when they sit in a hot path."""
 
 REVIEWERS = [
     Reviewer("correctness", "claude-sonnet-5-5", CORRECTNESS, budget_usd=2.0),
