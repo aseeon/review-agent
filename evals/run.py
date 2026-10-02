@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ from typing import TypedDict
 
 from review_agent.findings import Finding
 from review_agent.review import Report, run_review
+from review_agent.reviewers import REVIEWERS
 
 HERE = Path(__file__).parent
 TOLERANCE = 3
@@ -76,6 +78,12 @@ def score(report: Report, defects: list[Defect], lines: dict[str, int]) -> dict[
     return {"found": found, "extras": [f"{f.category} {f.file}:{f.line_start} {f.description[:80]}" for f in extras]}
 
 
+def prompt_fingerprint() -> str:
+    """Short hash of every reviewer's system prompt, so each result names what it measured."""
+    text = "\n".join(f"{r.name}:{r.model}:{r.system_prompt()}" for r in REVIEWERS)
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
 def cost(report: Report) -> float:
     return round(sum(r.cost_usd for r in report.reviewers.values()), 4)
 
@@ -103,6 +111,7 @@ async def main() -> None:
             result = {
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "run": n,
+                "prompts": prompt_fingerprint(),
                 "status": [planted.status, quiet.status],
                 **score(planted, defects, lines),
                 "unverified": len(planted.unverified) + len(quiet.unverified),
