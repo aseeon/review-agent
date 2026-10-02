@@ -37,9 +37,19 @@ def test_same_category_overlap_keeps_the_stronger_finding():
     assert [f.severity for f in kept] == ["high"]
 
 
-def test_different_categories_on_the_same_lines_are_both_kept():
+def test_correctness_on_a_specialists_lines_is_folded_in_as_corroboration():
     kept, _ = merge([finding("security", start=5), finding("correctness", start=5)])
-    assert {f.category for f in kept} == {"security", "correctness"}
+    assert [(f.category, f.also_flagged_by) for f in kept] == [("security", ["correctness"])]
+
+
+def test_fold_keeps_the_specialist_and_the_worse_severity_whichever_comes_first():
+    kept, _ = merge([finding("correctness", start=5, severity="high"), finding("performance", start=5, severity="low")])
+    assert [(f.category, f.severity, f.also_flagged_by) for f in kept] == [("performance", "high", ["correctness"])]
+
+
+def test_two_specialists_on_the_same_lines_are_both_kept():
+    kept, _ = merge([finding("security", start=24), finding("performance", start=24)])
+    assert {f.category for f in kept} == {"security", "performance"}
 
 
 def test_ranked_by_severity_then_confidence():

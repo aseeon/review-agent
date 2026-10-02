@@ -106,6 +106,8 @@ async def main() -> None:
                 "status": [planted.status, quiet.status],
                 **score(planted, defects, lines),
                 "unverified": len(planted.unverified) + len(quiet.unverified),
+                "corroborated": [f"{f.category}+{'+'.join(f.also_flagged_by)} {f.file}:{f.line_start}"
+                                 for f in planted.findings if f.also_flagged_by],
                 "clean_findings": [f"{f.category} {f.file}:{f.line_start} {f.description[:80]}" for f in quiet.findings],
                 "cost_usd": cost(planted) + cost(quiet),
             }

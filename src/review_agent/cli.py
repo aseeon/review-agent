@@ -41,7 +41,8 @@ def print_report(report: Report) -> None:
         detail = r.error or f"{r.tool_calls} tool calls, ${r.cost_usd:.2f}"
         print(f"  {name:<12} {r.status:<7} {detail}")
     for f in report.findings:
-        print(f"\n[{f.severity}] {f.category}  {f.file}:{f.line_start}-{f.line_end}  ({f.confidence})")
+        also = f", also flagged by {', '.join(f.also_flagged_by)}" if f.also_flagged_by else ""
+        print(f"\n[{f.severity}] {f.category}  {f.file}:{f.line_start}-{f.line_end}  ({f.confidence}{also})")
         print(f"    {f.description}")
         if f.suggested_fix:
             print(f"    fix: {f.suggested_fix}")

@@ -31,5 +31,5 @@ def test_bad_citations_get_the_citation_message_with_each_problem():
 def test_schema_describes_every_field_the_model_fills():
     schema = cast(dict[str, dict[str, dict[str, dict[str, dict[str, object]]]]], ReviewerOutput.model_json_schema())
     props = schema["$defs"]["Finding"]["properties"]
-    assert set(props) == set(Finding.model_fields) - {"category"}
+    assert set(props) == set(Finding.model_fields) - {"category", "also_flagged_by"}  # set by code
     assert all("description" in p for p in props.values())

@@ -40,6 +40,8 @@ class Finding(BaseModel):
     suggested_fix: str = Field(default="", description="The smallest change that fixes it.")
     # Set by code from the reviewer that reported it, so it's not in the model's schema.
     category: SkipJsonSchema[str] = ""
+    # Other reviewers whose findings on the same lines were folded into this one.
+    also_flagged_by: SkipJsonSchema[list[str]] = []
 
     @model_validator(mode="after")
     def _range(self) -> Finding:
@@ -86,17 +88,46 @@ def _overlaps(a: Finding, b: Finding) -> bool:
     return a.file == b.file and a.line_start <= b.line_end and b.line_start <= a.line_end
 
 
-def merge(findings: list[Finding]) -> tuple[list[Finding], int]:
-    """Rank, dedupe and cap. Returns the kept findings and how many the cap dropped.
+CATCH_ALL = "correctness"  # in the broad sense every bug is a correctness bug
 
-    Same file, overlapping lines and same category: only the stronger finding is kept.
-    Different categories on the same lines are both kept (an inverted permission check is
-    a bug and a hole). Ranking comes first, so the stronger duplicate always wins.
+
+def _fold(specialist: Finding, catch_all: Finding) -> Finding:
+    """The specialist's finding stands; the catch-all one counts as corroboration."""
+    severity = max(specialist.severity, catch_all.severity, key=SEVERITY_RANK.__getitem__)
+    return specialist.model_copy(update={
+        "severity": severity,
+        "also_flagged_by": [*specialist.also_flagged_by, catch_all.category],
+    })
+
+
+def merge(findings: list[Finding]) -> tuple[list[Finding], int]:
+    """Rank, dedupe, fold and cap. Returns the kept findings and how many the cap dropped.
+
+    - Same category, overlapping lines: only the stronger finding is kept. Ranking comes
+      first, so the stronger duplicate always wins.
+    - A correctness finding overlapping a security or performance finding is folded into
+      it: the specialist's framing stands, the severity is the worse of the two, and
+      correctness is listed as also flagging it. Correctness is the catch-all, so its
+      version of a security or performance defect adds corroboration, not a new problem.
+    - Security and performance on the same lines are both kept: an injectable query that
+      also can't use an index is two problems.
     """
     kept: list[Finding] = []
     for f in sorted(findings, key=_rank, reverse=True):
-        if not any(k.category == f.category and _overlaps(k, f) for k in kept):
-            kept.append(f)
+        if any(k.category == f.category and _overlaps(k, f) for k in kept):
+            continue
+        if f.category == CATCH_ALL:
+            i = next((i for i, k in enumerate(kept) if k.category != CATCH_ALL and _overlaps(k, f)), None)
+            if i is not None:
+                kept[i] = _fold(kept[i], f)
+                continue
+        else:
+            i = next((i for i, k in enumerate(kept) if k.category == CATCH_ALL and _overlaps(k, f)), None)
+            if i is not None:
+                kept[i] = _fold(f, kept[i])
+                continue
+        kept.append(f)
+    kept.sort(key=_rank, reverse=True)  # folding can raise a finding's severity
     return kept[:MAX_FINDINGS], max(0, len(kept) - MAX_FINDINGS)
 
 
