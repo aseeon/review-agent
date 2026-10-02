@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from fnmatch import fnmatchcase
 
 from claude_agent_sdk import McpSdkServerConfig, ToolAnnotations, create_sdk_mcp_server, tool
 
@@ -12,6 +13,12 @@ GIT_TOOL = "mcp__git__get_changed_files"
 # review.py), so the note about what was left out is always what the reviewer sees.
 MAX_DIFF_CHARS = 60_000
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Lockfiles and generated code: large, written by tools, and rarely where a defect lives.
+# One changed uv.lock could spend the whole budget, so they are named instead of packed.
+GENERATED = (
+    "*.lock", "package-lock.json", "pnpm-lock.yaml", "go.sum",
+    "*.min.js", "*.min.css", "*_pb2.py", "*_pb2_grpc.py", "*.pb.go",
+)
 
 DESCRIPTION = """\
 Get the diff for a commit range in the repository under review: a --stat summary, then \
@@ -57,6 +64,11 @@ def split_files(patch: str) -> list[tuple[str, str]]:
             path = chunk.split("\n", 1)[0].split(" b/", 1)[-1]
             files.append((path, chunk.rstrip("\n")))
     return files
+
+
+def is_generated(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return any(fnmatchcase(name, pattern) for pattern in GENERATED)
 
 
 def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[str, list[str]]:
@@ -148,7 +160,12 @@ def build_git_server(repo_path: str) -> McpSdkServerConfig:
                 numbered = f"{numbered[:MAX_DIFF_CHARS]}\n\n[cut at {MAX_DIFF_CHARS} chars; Read {path} for the rest.]"
             return _text(f"{stat}\n{numbered}")
 
-        body, left_out = pack(split_files(numbered))
+        files = split_files(numbered)
+        generated = [p for p, _ in files if is_generated(p)]
+        body, left_out = pack([(p, text) for p, text in files if not is_generated(p)])
+        if generated:
+            names = ", ".join(generated)
+            body += f"\n\n[Not included, lockfile or generated: {names}. Call get_changed_files with path set to one of them if the change could matter.]"
         if left_out:
             names = ", ".join(left_out)
             body += f"\n\n[Not included, over the size budget: {names}. Call get_changed_files again with path set to one of them, or Read the file.]"

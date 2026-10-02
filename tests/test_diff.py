@@ -1,4 +1,4 @@
-from review_agent.diff import number_lines, pack, split_files
+from review_agent.diff import is_generated, number_lines, pack, split_files
 
 PATCH = """\
 diff --git a/app.py b/app.py
@@ -44,3 +44,8 @@ def test_pack_takes_whole_files_and_lists_the_rest():
     text, left_out = pack(files, budget=30)
     assert left_out == ["big.py"]
     assert "y" * 10 in text and "z" * 10 in text and "x" not in text
+
+
+def test_lockfiles_and_generated_code_are_named_not_packed():
+    assert all(map(is_generated, ["uv.lock", "web/package-lock.json", "api/user_pb2.py", "dist/app.min.js"]))
+    assert not any(map(is_generated, ["lock.py", "src/locks.rs", "pyproject.toml", "app.js"]))
