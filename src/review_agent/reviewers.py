@@ -72,11 +72,6 @@ REVIEWERS = [
 SHARED_RULES = """\
 Every finding is a defect: code that behaves wrongly for some real input or state. Every
 finding names its trigger: the input, state or call path that makes it go wrong.
-A defect is worth a reader's time when someone running the software would notice it under
-realistic use. So these are not defects: a trigger that needs input the code's real sources
-never produce (malformed output from a local tool it calls, a value nothing reaches); harm
-that a later check already stops; naming, duplication and hardening notes; a cost you would
-call negligible yourself.
 
 How to work:
 - Where there is a diff, it is where you start, not the edge of what you may read. Read or
