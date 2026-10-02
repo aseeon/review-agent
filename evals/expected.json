@@ -1,0 +1,14 @@
+{
+  "defects": [
+    {"id": "sql-injection", "category": "security", "file": "shop/db.py",
+     "at": "WHERE name LIKE '%{name}%'"},
+    {"id": "n-plus-one", "category": "performance", "file": "shop/reports.py",
+     "at": "customer = db.get_customer(conn, order[\"customer_id\"])"},
+    {"id": "off-by-one", "category": "correctness", "file": "shop/pagination.py",
+     "at": "end = start + size - 1"},
+    {"id": "hardcoded-secret", "category": "security", "file": "shop/config.py",
+     "at": "pay_live_"},
+    {"id": "missing-auth", "category": "security", "file": "shop/api.py",
+     "at": "def delete_order(user, conn, order_id: int):", "cross_file": true}
+  ]
+}

@@ -77,7 +77,13 @@ git clone https://github.com/aseeon/review-agent && cd review-agent
 uv sync              # .venv with the package and dev tools
 uv run pytest        # unit tests, no network
 uv run basedpyright  # type check
+uv run python evals/run.py --runs 3   # planted-defect eval, calls the model (~$0.15/run)
 ```
+
+The eval builds a small repository with five planted defects (one only visible across
+files) and a separate clean change, reviews both, and scores the findings against
+`evals/expected.json`: a defect counts as found when a finding has the same file and
+category and lands within three lines of it. Results append to `runs/evals/planted.jsonl`.
 
 ## Limitations
 

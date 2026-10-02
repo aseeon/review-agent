@@ -20,3 +20,12 @@ def test_invalid_override_is_rejected(monkeypatch: pytest.MonkeyPatch, raw: str)
     monkeypatch.setenv("REVIEW_AGENT_PERFORMANCE_BUDGET_USD", raw)
     with pytest.raises(ValueError, match="REVIEW_AGENT_PERFORMANCE_BUDGET_USD"):
         _ = BUDGETS["performance"].budget()
+
+
+def test_each_reviewer_is_scoped_to_its_own_area_by_name():
+    from review_agent.reviewers import REVIEWERS
+
+    for r in REVIEWERS:
+        prompt = r.system_prompt()
+        assert f"What to report: {r.name} defects only." in prompt
+        assert "{area}" not in prompt
