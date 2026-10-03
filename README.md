@@ -39,7 +39,7 @@ review of main..HEAD: complete, severity high, 2 findings
   security     ok      22 tool calls, $1.12
   performance  ok      9 tool calls, $0.28
 
-[high] security  app/api.py:41-44  (high)
+[high] security  app/api.py:41-44  (confirmed)
     ...
 ```
 
@@ -56,7 +56,9 @@ review of main..HEAD: complete, severity high, 2 findings
 
 - **Fixed fan-out.** The three reviewers run concurrently, and plain code merges their
   output rather than another model. Overlapping findings in the same category are
-  deduplicated. The rest are ranked by severity, then confidence, and capped at 10.
+  deduplicated, and a correctness finding on a security or performance finding's lines is
+  folded into it as corroboration. The rest are ranked by severity, then confidence, and
+  capped at 10.
 - **Read-only.** Reviewers can use only `Read`, `Grep`, `Glob` and a `get_changed_files`
   diff tool: no writes, no shell, no network. The reviewed repo's `CLAUDE.md` and
   settings are not loaded, so repository content can't give the agent instructions.
@@ -68,7 +70,8 @@ review of main..HEAD: complete, severity high, 2 findings
   run `partial` and shows the reason.
 
 Reviewer prompts, models and default budgets are in `src/review_agent/reviewers.py`. The
-turn limit is in `build_options` in `src/review_agent/review.py`.
+turn limit is in `build_options` in `src/review_agent/review.py`. The reasons behind each
+decision, the measurements and what's planned next are in [docs/design.md](docs/design.md).
 
 ## Develop
 
@@ -91,7 +94,6 @@ category and lands within three lines of it. Results append to `runs/evals/plant
 - Large diffs are packed a whole file at a time, in git's order. Files that don't fit are
   listed by name, and reviewers can fetch them one at a time.
 - Performance review is static: nothing is executed or benchmarked.
-- There is no eval harness yet.
 
 ## License
 
