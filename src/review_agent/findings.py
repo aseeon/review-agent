@@ -8,12 +8,12 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
-MAX_FINDINGS = 10  # per report; each reviewer is also asked for at most 5
+MAX_FINDINGS = 10  # per report. Each reviewer is also asked for at most 5.
 
 
 class Finding(BaseModel):
-    # The descriptions are part of the schema the reviewer model is given: they are the
-    # single definition of each field. The prompt keeps only the judgement rules.
+    # The reviewer model gets these descriptions as part of its schema. They are the only
+    # definition of each field. The prompt holds only the judgement rules.
     file: str = Field(description="Path relative to the repository root.")
     line_start: int = Field(
         ge=1,
@@ -62,11 +62,11 @@ class ReviewerOutput(BaseModel):
 
 
 def check_citation(f: Finding, lines: list[str] | None) -> tuple[str, Finding]:
-    """Is the quoted code at the cited lines? Returns (status, finding).
+    """Check that the quoted code is at the cited lines. Returns (status, finding).
 
     "ok": it's there. "relocated": the quote appears exactly once elsewhere in the file,
     so the lines are corrected. "unverified": the file is missing, or the quote is absent
-    or ambiguous. A string match either finds the code or it doesn't; it can't guess.
+    or ambiguous. Only the first non-blank line of the quote is matched.
     """
     quote = next((line.strip() for line in f.quote.splitlines() if line.strip()), "")
     if lines is None or not quote:
@@ -92,7 +92,7 @@ CATCH_ALL = "correctness"  # in the broad sense every bug is a correctness bug
 
 
 def _fold(specialist: Finding, catch_all: Finding) -> Finding:
-    """The specialist's finding stands; the catch-all one counts as corroboration."""
+    """Keep the specialist's finding and count the catch-all one as corroboration."""
     severity = max(specialist.severity, catch_all.severity, key=SEVERITY_RANK.__getitem__)
     return specialist.model_copy(update={
         "severity": severity,
@@ -103,14 +103,14 @@ def _fold(specialist: Finding, catch_all: Finding) -> Finding:
 def merge(findings: list[Finding]) -> tuple[list[Finding], int]:
     """Rank, dedupe, fold and cap. Returns the kept findings and how many the cap dropped.
 
-    - Same category, overlapping lines: only the stronger finding is kept. Ranking comes
-      first, so the stronger duplicate always wins.
-    - A correctness finding overlapping a security or performance finding is folded into
-      it: the specialist's framing stands, the severity is the worse of the two, and
-      correctness is listed as also flagging it. Correctness is the catch-all, so its
-      version of a security or performance defect adds corroboration, not a new problem.
-    - Security and performance on the same lines are both kept: an injectable query that
-      also can't use an index is two problems.
+    - When two findings in the same category overlap, only the stronger one is kept.
+      Findings are ranked first, so the stronger duplicate always wins.
+    - A correctness finding that overlaps a security or performance finding is folded into
+      it. The specialist's description stays, the severity is the worse of the two, and
+      correctness goes into also_flagged_by. Correctness is the catch-all, so its version
+      of a security or performance defect corroborates it and adds no new problem.
+    - Security and performance findings on the same lines are both kept. An injectable
+      query that also can't use an index is two problems.
     """
     kept: list[Finding] = []
     for f in sorted(findings, key=_rank, reverse=True):
@@ -132,5 +132,5 @@ def merge(findings: list[Finding]) -> tuple[list[Finding], int]:
 
 
 def overall_severity(findings: list[Finding]) -> str:
-    """The worst finding decides. The model never reports an overall severity."""
+    """The model never reports an overall severity."""
     return max((f.severity for f in findings), key=SEVERITY_RANK.__getitem__, default="none")

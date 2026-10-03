@@ -35,7 +35,6 @@ log = logging.getLogger("review")
 
 READ_TOOLS = ["Read", "Grep", "Glob"]
 
-# A result subtype other than success means the reviewer didn't finish.
 FAILURES = {
     "error_max_budget_usd": "budget exhausted",
     "error_max_turns": "turn limit reached",
@@ -61,7 +60,7 @@ class ReviewerFailed(Exception):
 
 
 class ReviewerRun(BaseModel):
-    """One reviewer's outcome. Findings travel separately into the merged report."""
+    """One reviewer's outcome. Its findings go into the merged report separately."""
 
     model: str
     status: Literal["ok", "failed"] = "ok"
@@ -76,13 +75,14 @@ class ReviewerRun(BaseModel):
 
 
 class Report(BaseModel):
-    # A failed reviewer is a visible gap, never an empty list of findings.
+    # A failed reviewer shows in status and reviewers. It never looks like a clean run.
     status: Literal["complete", "partial", "failed"]
     range: str
     severity: str
     findings: list[Finding]
     dropped_by_cap: int
-    # Citations that still didn't match after one retry: shown, never counted.
+    # Findings whose citations still didn't match after one retry. They are printed but
+    # don't count toward severity or the findings total.
     unverified: list[Finding]
     reviewers: dict[str, ReviewerRun]
 
@@ -98,15 +98,15 @@ def build_options(reviewer: Reviewer, repo_path: str) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         system_prompt=reviewer.system_prompt(),
         cwd=repo_path,
-        # tools decides which built-ins exist; allowed_tools which run without a prompt.
-        # No write tools, no shell, no network: the worst an injected instruction can
-        # do is change the report.
+        # tools decides which built-in tools exist. allowed_tools decides which run
+        # without a prompt. With no write tools, no shell and no network, the worst an
+        # injected instruction can do is change the report.
         tools=READ_TOOLS,
         allowed_tools=[*READ_TOOLS, GIT_TOOL],
         mcp_servers={"git": build_git_server(repo_path)},
-        strict_mcp_config=True,     # ignore ambient .mcp.json / user settings
+        strict_mcp_config=True,     # ignore any .mcp.json and user MCP settings
         setting_sources=[],         # the reviewed repo's CLAUDE.md never becomes instructions
-        permission_mode="dontAsk",  # unattended: anything not allowed above is denied
+        permission_mode="dontAsk",  # nobody is there to approve, so anything not allowed is denied
         output_format={"type": "json_schema", "schema": ReviewerOutput.model_json_schema()},
         model=reviewer.model,
         max_turns=25,
@@ -114,15 +114,15 @@ def build_options(reviewer: Reviewer, repo_path: str) -> ClaudeAgentOptions:
         env={
             "API_TIMEOUT_MS": "120000",
             "CLAUDE_CODE_MAX_RETRIES": "2",
-            # Pinned like the models: the CLI's default cap on tool output can change
-            # under us. diff.py stays well below it.
+            # Pinned like the models, because the CLI's default cap on tool output can
+            # change between versions. diff.py stays well below it.
             "MAX_MCP_OUTPUT_TOKENS": "25000",
         },
     )
 
 
 def task(base: str | None, head: str | None) -> str:
-    """The first message: this run's steps and the finish line, which depend on the mode."""
+    """The first message. It gives the steps and the finish line, which depend on whether there is a base."""
     if base:
         head = head or "HEAD"
         return f"""\
@@ -140,7 +140,7 @@ You are done when every source file is in files_reviewed, or in files_skipped wi
 
 
 def feedback(checked: Checked) -> str:
-    """What to send back for one retry. A schema failure and bad citations need different fixes."""
+    """What to send back for the one retry."""
     if checked.output is None:
         return SCHEMA_FEEDBACK.format(errors=checked.problems[0])
     return CITATION_FEEDBACK + "\n".join(f"- {p}" for p in checked.problems)
@@ -165,7 +165,7 @@ async def collect(client: ClaudeSDKClient, name: str, run: ReviewerRun) -> Resul
 
 
 def file_reader(repo_path: str, base: str | None, head: str | None) -> LineReader:
-    """Lines of a file as reviewed: at head for a commit range, else the working tree."""
+    """Read a file's lines as reviewed, at head for a commit range or from the working tree."""
     root = Path(repo_path).resolve()
     cache: dict[str, list[str] | None] = {}
 
@@ -185,9 +185,10 @@ def file_reader(repo_path: str, base: str | None, head: str | None) -> LineReade
 
 
 def check_output(result: ResultMessage, read: LineReader) -> Checked:
-    """Validate one reviewer answer: the schema, then every citation against the file.
+    """Validate one reviewer answer. Check the schema, then every citation against the file.
 
-    Budget, turn and structured-output failures raise: the reviewer didn't finish.
+    Raises ReviewerFailed when the reviewer didn't finish (budget, turn limit, or no valid
+    structured output). A schema error is returned so it can be sent back.
     """
     if result.subtype in FAILURES:
         raise ReviewerFailed(FAILURES[result.subtype])
@@ -234,7 +235,7 @@ async def run_reviewer(reviewer: Reviewer, repo_path: str, base: str | None, hea
     except ReviewerFailed as e:
         run.status, run.error = "failed", str(e)
         return run
-    # Only reachable if the client swallowed an exception: never report that as clean.
+    # Reached only if the client swallowed an exception. Report it as a failure.
     run.status, run.error = "failed", "session closed without an answer"
     return run
 
@@ -256,8 +257,8 @@ def snapshot(repo_path: str, head: str) -> Generator[str]:
     """A temporary detached worktree at head, removed afterwards.
 
     The diff covers base..head, but Read and Grep read files from disk. Reviewing inside a
-    checkout of head means everything a reviewer reads is the code under review, not
-    whatever the working tree has moved on to since.
+    checkout of head means every file a reviewer reads is the code under review, even if
+    the working tree has changed since.
     """
     tmp = Path(tempfile.mkdtemp(prefix="review-agent-"))
     tree = tmp / "tree"
@@ -306,7 +307,7 @@ async def review_in(repo_path: str, base: str | None, head: str | None) -> Repor
 
 
 def record(report: Report, path: Path) -> None:
-    """Append one line per run: outcome, counts and cost, never code or file names."""
+    """Append one line per run with the outcome, counts and cost. It never writes code or file names."""
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

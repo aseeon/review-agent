@@ -12,7 +12,7 @@ class Reviewer:
     name: str   # also the category of every finding it reports
     model: str
     focus: str
-    budget_usd: float  # default spend cap; REVIEW_AGENT_<NAME>_BUDGET_USD overrides it
+    budget_usd: float  # default spend cap. REVIEW_AGENT_<NAME>_BUDGET_USD overrides it.
 
     def system_prompt(self) -> str:
         return self.focus + "\n\n" + SHARED_RULES.format(area=self.name)
@@ -31,11 +31,10 @@ class Reviewer:
         return value
 
 
-# Pinned, not aliases: results are only comparable if the model under them doesn't move
-# between runs. No fallback model either, for the same reason: a silent swap mid-run.
-# Correctness is defined by the world it assumes (a well-meaning caller), plus an ownership
-# test. In the broad sense every bug is a correctness bug, so a symptom-based definition made
-# this reviewer re-describe security and performance defects as functional ones.
+# The correctness prompt defines its area by the caller it assumes (a well-meaning one) and
+# by a test of which reviewer owns a defect. Every bug is a correctness bug in the broad
+# sense. When the prompt defined correctness by symptoms, this reviewer re-described
+# security and performance defects as functional ones.
 CORRECTNESS = """\
 You are a correctness reviewer. Your area is logic: whether the code gives the right result to \
 a well-meaning caller with legitimate input. Check whether it does what its names, docstrings \
@@ -57,18 +56,21 @@ so reason from the code itself. Find the hot paths (request handlers, loops over
 collections, queries) and look for N+1 queries, unbounded work, missing indexes and \
 blocking I/O. Quantify impact where you can (e.g. 'one query per item')."""
 
+# Pinned model IDs. Results are only comparable if the model stays the same between runs.
+# There is no fallback model for the same reason. A fallback would swap models mid-run
+# without saying so.
 REVIEWERS = [
     Reviewer("correctness", "claude-sonnet-5-5", CORRECTNESS, budget_usd=2.0),
-    # Opus for security: the missing check is often in another file. Opus also costs
-    # more per token and reads more files, hence the larger budget.
+    # Opus for security, because the missing check is often in another file. Opus also
+    # costs more per token and reads more files, so it gets a larger budget.
     Reviewer("security", "claude-opus-5-5", SECURITY, budget_usd=4.0),
     Reviewer("performance", "claude-sonnet-5-5", PERFORMANCE, budget_usd=2.0),
 ]
 
-# Judgement only, filled in with each reviewer's area. Field definitions live in the output
-# schema (findings.py); the steps and the finish line for each mode live in the task message
-# (review.py), because only the task knows whether there is a diff. The boundary between
-# reviewers lives here and only here, so it can't contradict itself.
+# Judgement rules only, filled in with each reviewer's area. Field definitions are in the
+# output schema (findings.py). The steps and the finish line for each mode are in the task
+# message (review.py), because only the task knows whether there is a diff. The boundary
+# between reviewers is written here and nowhere else, so it can't contradict itself.
 SHARED_RULES = """\
 Every finding is a defect: code that behaves wrongly for some real input or state. Every
 finding names its trigger: the input, state or call path that makes it go wrong.

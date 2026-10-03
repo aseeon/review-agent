@@ -1,1 +1,1 @@
-"""A code review agent: three read-only reviewers in parallel, merged into one report."""
+"""A code review agent. Three read-only reviewers run in parallel and their findings are merged into one report."""

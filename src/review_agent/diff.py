@@ -1,4 +1,4 @@
-"""The get_changed_files tool: what changed in a commit range, sized to fit a tool result."""
+"""The get_changed_files tool. It returns what changed in a commit range, sized to fit in one tool result."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ from claude_agent_sdk import McpSdkServerConfig, ToolAnnotations, create_sdk_mcp
 
 GIT_TOOL = "mcp__git__get_changed_files"
 # Stays well under the CLI's cap on MCP tool output (MAX_MCP_OUTPUT_TOKENS, pinned in
-# review.py), so the note about what was left out is always what the reviewer sees.
+# review.py), so the CLI never cuts off the note that lists the files left out.
 MAX_DIFF_CHARS = 60_000
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-# Lockfiles and generated code: large, written by tools, and rarely where a defect lives.
-# One changed uv.lock could spend the whole budget, so they are named instead of packed.
+# Lockfiles and generated code are large, written by tools and rarely hold a defect.
+# One changed uv.lock could use the whole budget, so these files are listed by name and
+# their diffs are left out.
 GENERATED = (
     "*.lock", "package-lock.json", "pnpm-lock.yaml", "go.sum",
     "*.min.js", "*.min.css", "*_pb2.py", "*_pb2_grpc.py", "*.pb.go",
@@ -33,8 +34,8 @@ ToolResult = dict[str, object]
 def number_lines(patch: str) -> str:
     """Prefix every line that exists in the new file with its line number.
 
-    The model then reads line numbers instead of working them out from hunk headers,
-    which is where wrong citations came from. Removed lines get no number.
+    The model can then read line numbers directly. Working them out from hunk headers
+    caused wrong citations. Removed lines get no number.
     """
     out: list[str] = []
     n: int | None = None
@@ -57,7 +58,7 @@ def number_lines(patch: str) -> str:
 
 
 def split_files(patch: str) -> list[tuple[str, str]]:
-    """[(path, that file's diff)] in the order git printed them."""
+    """Split a patch into (path, diff) pairs, in the order git printed them."""
     files: list[tuple[str, str]] = []
     for chunk in re.split(r"(?m)^(?=diff --git )", patch):
         if chunk.startswith("diff --git "):
@@ -72,7 +73,10 @@ def is_generated(path: str) -> bool:
 
 
 def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[str, list[str]]:
-    """Whole files until the budget is spent, never part of one. Returns (text, left out)."""
+    """Add whole files until the budget is spent. Returns (text, paths left out).
+
+    A file that doesn't fit is left out whole, and smaller files after it can still fit.
+    """
     parts: list[str] = []
     left_out: list[str] = []
     used = 0
@@ -86,10 +90,10 @@ def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[st
 
 
 def parse_args(args: dict[str, object]) -> tuple[dict[str, str], str | None] | str:
-    """({"base": ref, "head": ref}, path or None), or the message telling the model what to fix.
+    """Return ({"base": ref, "head": ref}, path or None), or a message telling the model what to fix.
 
-    Validate instead of indexing: a KeyError would crash the tool call instead of telling
-    the model how to fix it. A value starting with "-" would reach git as an option.
+    Indexing would raise KeyError and crash the tool call, so a missing key returns the
+    message. Values starting with "-" are rejected because git would read them as options.
     """
     refs: dict[str, str] = {}
     for name in ("base", "head"):
@@ -111,13 +115,13 @@ def _text(text: str) -> ToolResult:
 
 
 async def _git(repo_path: str, *args: str) -> tuple[int, str, str]:
-    # Exec, not shell: refs never pass through a shell parser.
+    # No shell, so refs never pass through a shell parser.
     proc = await asyncio.create_subprocess_exec(
         "git", *args, cwd=repo_path,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     out, err = await proc.communicate()
-    code = await proc.wait()  # already exited; wait() gives the code as an int
+    code = await proc.wait()  # returncode is typed int | None. wait() on an exited process returns an int.
     return code, out.decode(errors="replace"), err.decode(errors="replace")
 
 
@@ -165,7 +169,7 @@ def build_git_server(repo_path: str) -> McpSdkServerConfig:
             return _text(f"git diff failed for {commit_range}: {err.strip()}")
         numbered = number_lines(patch)
 
-        if path:  # one file: cut only if that single file is over budget
+        if path:
             if len(numbered) > MAX_DIFF_CHARS:
                 numbered = f"{numbered[:MAX_DIFF_CHARS]}\n\n[cut at {MAX_DIFF_CHARS} chars; Read {path} for the rest.]"
             return _text(f"{stat}\n{numbered}")
