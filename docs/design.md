@@ -157,8 +157,8 @@ code.
   was noise, not invented bugs.
 - After the citation, scope and worktree fixes: 7 real of 11 distinct, so 64%. No false
   findings and no unverified citations.
-- Current prompt, on the two repositories with known bugs, three runs: 13 real of the 16
-  labelled findings (81%), about 4.3 known-real bugs found per run.
+- Current prompt, on the two repositories with known bugs, three runs: 14 real of 18
+  findings (78%), 14 real bugs in total.
 
 **A change I reverted.** One sentence telling reviewers what isn't worth reporting
 (unreachable triggers, harm a later check already stops, naming and hardening notes,
@@ -167,12 +167,16 @@ A/B on the labelled repositories, three runs per prompt, showed the trade:
 
 | | Without the sentence | With it |
 |---|---|---|
-| Known-real bugs found per run | 4.3 | 2.3 |
-| Precision on labelled findings | 81% | 88% |
+| Real bugs found, 3 runs | 14 | 7 |
+| Precision | 14/18 = 78% | 7/9 = 78% |
 
-It cut real low-severity bugs and still let some of its target noise through, so it was
-reverted (`320aef5`). The planted eval alone would have approved it: recall on five
-planted bugs can't see the loss of narrow real ones.
+It halved the real bugs found and bought no precision: the noise it removed was matched by
+the noise it let through, including a finding that repeated another in the same report. It
+was reverted (`320aef5`). The commit message gives 81% against 88%, from before the last
+three findings were labelled; with every finding labelled, the precision is equal.
+
+The planted eval alone would have approved it: recall on five planted bugs can't see the
+loss of narrow real ones.
 
 **Caveats.** Three runs per variant, small fixtures, one person labelling. Run-to-run
 variance is large: on one repository, runs found anywhere from 0 to 3 real bugs. The
