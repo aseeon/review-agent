@@ -1,3 +1,4 @@
+import contextlib
 import subprocess
 from pathlib import Path
 
@@ -29,11 +30,16 @@ def test_reads_the_reviewed_commit_not_the_working_tree(repo: Path):
     assert (repo / "app.py").read_text() == "uncommitted\n"  # the user's checkout is untouched
 
 
-def test_worktree_is_removed_afterwards(repo: Path):
-    with snapshot(str(repo), "HEAD") as tree:
-        path = Path(tree)
-        assert path.exists()
-    assert not path.exists()
+@pytest.mark.parametrize("fail", [False, True])
+def test_worktree_is_removed_afterwards(repo: Path, fail: bool):
+    path = None
+    with pytest.raises(RuntimeError) if fail else contextlib.nullcontext():
+        with snapshot(str(repo), "HEAD") as tree:
+            path = Path(tree)
+            assert path.exists()
+            if fail:
+                raise RuntimeError("review crashed")
+    assert path is not None and not path.exists()
     assert git(repo, "worktree", "list").count("\n") == 1
 
 

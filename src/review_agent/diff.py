@@ -85,6 +85,27 @@ def pack(files: list[tuple[str, str]], budget: int = MAX_DIFF_CHARS) -> tuple[st
     return "\n".join(parts), left_out
 
 
+def parse_args(args: dict[str, object]) -> tuple[dict[str, str], str | None] | str:
+    """({"base": ref, "head": ref}, path or None), or the message telling the model what to fix.
+
+    Validate instead of indexing: a KeyError would crash the tool call instead of telling
+    the model how to fix it. A value starting with "-" would reach git as an option.
+    """
+    refs: dict[str, str] = {}
+    for name in ("base", "head"):
+        value = args.get(name)
+        if not isinstance(value, str) or not value.strip():
+            return f"Missing '{name}'. Pass both base and head as git refs, e.g. base='main', head='HEAD' or base='HEAD~1', head='HEAD'."
+        value = value.strip()
+        if value.startswith("-"):
+            return f"'{name}' must be a git ref, not an option: {value!r}."
+        refs[name] = value
+    raw_path = args.get("path")
+    if raw_path is not None and (not isinstance(raw_path, str) or not raw_path.strip() or raw_path.startswith("-")):
+        return "'path' must be a file path from the --stat summary, or omitted."
+    return refs, raw_path.strip() if isinstance(raw_path, str) else None
+
+
 def _text(text: str) -> ToolResult:
     return {"content": [{"type": "text", "text": text}]}
 
@@ -118,21 +139,10 @@ def build_git_server(repo_path: str) -> McpSdkServerConfig:
         annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
     )
     async def get_changed_files(args: dict[str, object]) -> ToolResult:
-        # Validate instead of indexing: a KeyError here would crash the tool call
-        # instead of telling the model how to fix it. This text becomes its next prompt.
-        refs: dict[str, str] = {}
-        for name in ("base", "head"):
-            value = args.get(name)
-            if not isinstance(value, str) or not value.strip():
-                return _text(f"Missing '{name}'. Pass both base and head as git refs, e.g. base='main', head='HEAD' or base='HEAD~1', head='HEAD'.")
-            value = value.strip()
-            if value.startswith("-"):
-                return _text(f"'{name}' must be a git ref, not an option: {value!r}.")
-            refs[name] = value
-        raw_path = args.get("path")
-        if raw_path is not None and (not isinstance(raw_path, str) or not raw_path.strip() or raw_path.startswith("-")):
-            return _text("'path' must be a file path from the --stat summary, or omitted.")
-        path = raw_path.strip() if isinstance(raw_path, str) else None
+        parsed = parse_args(args)
+        if isinstance(parsed, str):
+            return _text(parsed)
+        refs, path = parsed
 
         for name, ref in refs.items():
             code, _, _ = await _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")

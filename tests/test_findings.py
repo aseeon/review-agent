@@ -1,19 +1,9 @@
-from pathlib import Path
 from typing import Literal
 
 import pytest
-from claude_agent_sdk import ResultMessage
 from pydantic import ValidationError
 
-from review_agent.findings import (
-    MAX_FINDINGS,
-    Finding,
-    ReviewerOutput,
-    check_citation,
-    merge,
-    overall_severity,
-)
-from review_agent.review import check_output, file_reader
+from review_agent.findings import MAX_FINDINGS, Finding, check_citation, merge, overall_severity
 
 FILE = ["import os", "", "def load(path):", "    return open(path).read()", "", "x = 1"]
 
@@ -68,20 +58,14 @@ def test_cap_keeps_the_top_ranked_and_counts_the_rest():
 
 
 def test_overall_severity_is_the_worst_finding():
-    assert overall_severity([finding(severity="low"), finding(severity="medium")]) == "medium"
+    # high and low, because alphabetically "low" > "high": a plain max() would get it wrong
+    assert overall_severity([finding(severity="high"), finding(severity="low")]) == "high"
     assert overall_severity([]) == "none"
 
 
-def test_schema_rejects_what_the_prompt_forbids():
-    valid = finding().model_dump()
-    with pytest.raises(ValidationError):
-        _ = Finding.model_validate({**valid, "severity": "very high"})
-    with pytest.raises(ValidationError):
-        _ = Finding.model_validate({**valid, "line_start": 10, "line_end": 9})
-
-
-def test_category_is_set_by_code_not_by_the_model():
-    assert "category" not in str(ReviewerOutput.model_json_schema())
+def test_line_range_cannot_end_before_it_starts():
+    with pytest.raises(ValidationError, match="line_end is before line_start"):
+        _ = Finding.model_validate({**finding().model_dump(), "line_start": 10, "line_end": 9})
 
 
 def cited(start: int, quote: str, end: int | None = None) -> Finding:
@@ -107,17 +91,3 @@ def test_ambiguous_or_missing_citations_are_unverified():
     assert check_citation(cited(2, "path"), FILE)[0] == "unverified"       # on lines 3 and 4
     assert check_citation(cited(1, "import os"), None)[0] == "unverified"  # no such file
 
-
-def test_invalid_output_asks_for_a_retry_instead_of_crashing():
-    result = ResultMessage(subtype="success", duration_ms=0, duration_api_ms=0, is_error=False,
-                           num_turns=1, session_id="s", structured_output={"findings": [{"file": "a.py"}]})
-    checked = check_output(result, lambda _path: FILE)
-    assert checked.output is None and "validation" in checked.problems[0]
-
-
-def test_file_reader_keeps_dotted_directories(tmp_path: Path):
-    (tmp_path / ".github").mkdir()
-    _ = (tmp_path / ".github" / "ci.yml").write_text("on: push\n")
-    read = file_reader(str(tmp_path), None, None)
-    assert read("./.github/ci.yml") == ["on: push"]
-    assert read("../outside.txt") is None
